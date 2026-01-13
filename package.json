@@ -1,0 +1,142 @@
+{
+  "name": "antigravity-copilot",
+  "displayName": "Antigravity for Copilot",
+  "description": "Use Google Antigravity models (Claude, Gemini) in GitHub Copilot Chat via CLIProxyAPI",
+  "version": "1.0.0",
+  "publisher": "punal100",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Machine Learning",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "antigravity",
+    "copilot",
+    "claude",
+    "gemini",
+    "ai",
+    "cli-proxy-api"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "antigravity-copilot.startServer",
+        "title": "Start Antigravity Server",
+        "category": "Antigravity"
+      },
+      {
+        "command": "antigravity-copilot.stopServer",
+        "title": "Stop Antigravity Server",
+        "category": "Antigravity"
+      },
+      {
+        "command": "antigravity-copilot.restartServer",
+        "title": "Restart Antigravity Server",
+        "category": "Antigravity"
+      },
+      {
+        "command": "antigravity-copilot.showServerControls",
+        "title": "Show Server Controls",
+        "category": "Antigravity"
+      },
+      {
+        "command": "antigravity-copilot.configureModels",
+        "title": "Configure Copilot Models",
+        "category": "Antigravity"
+      },
+      {
+        "command": "antigravity-copilot.loginAntigravity",
+        "title": "Login to Antigravity",
+        "category": "Antigravity"
+      }
+    ],
+    "configuration": {
+      "title": "Antigravity for Copilot",
+      "properties": {
+        "antigravityCopilot.server.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the Antigravity server on startup"
+        },
+        "antigravityCopilot.server.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start the server when VS Code opens"
+        },
+        "antigravityCopilot.server.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to cli-proxy-api.exe (leave empty to auto-detect in %USERPROFILE%\\CLIProxyAPI)"
+        },
+        "antigravityCopilot.server.port": {
+          "type": "number",
+          "default": 8317,
+          "description": "Port number for CLIProxyAPI server"
+        },
+        "antigravityCopilot.server.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host address for CLIProxyAPI server"
+        },
+        "antigravityCopilot.autoConfigureCopilot": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically configure Copilot Chat custom models on startup"
+        },
+        "antigravityCopilot.showNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show notifications for server events"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "antigravity-copilot",
+          "title": "Antigravity",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "antigravity-copilot": [
+        {
+          "type": "webview",
+          "id": "antigravity-copilot.sidebarView",
+          "name": "Dashboard"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.95.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "repository": "https://github.com/punal100/antigravity-copilot",
+  "homepage": "https://github.com/punal100/antigravity-copilot#readme",
+  "bugs": "https://github.com/punal100/antigravity-copilot/issues",
+  "license": "MIT"
+}

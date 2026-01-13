@@ -1,0 +1,26 @@
+# Source files (bundled by esbuild)
+src/**
+**/*.ts
+tsconfig.json
+
+# Build/dev tooling
+esbuild.js
+.eslintrc*
+.prettierrc*
+
+# Git & IDE
+.git/**
+.github/**
+.vscode/**
+*.code-workspace
+
+# Test files
+**/*.test.ts
+**/test/**
+
+# Misc
+.gitignore
+.DS_Store
+Thumbs.db
+*.vsix
+node_modules/**

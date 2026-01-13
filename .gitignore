@@ -1,0 +1,18 @@
+# Ignore project files
+/.vsconfig
+/.vs/*
+/.vscode/*
+/.idea/*
+/*.sln
+/*.code-workspace
+/*.vscode-workspace
+
+# Ignore generated folders
+node_modules/
+dist/
+out/
+*.vsix
+.vscode-test/
+.DS_Store
+Thumbs.db
+*.log
