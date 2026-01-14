@@ -2,7 +2,7 @@
   "name": "antigravity-copilot",
   "displayName": "Antigravity for Copilot",
   "description": "Use Google Antigravity models (Claude, Gemini) in GitHub Copilot Chat via CLIProxyAPI",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "punal100",
   "icon": "media/icon.png",
   "engines": {
@@ -131,6 +131,67 @@
           "type": "boolean",
           "default": true,
           "description": "Show notifications when requests are blocked due to rate limiting"
+        },
+        "antigravityCopilot.proxy.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable a local throttling proxy (queues Copilot requests to reduce upstream 429s). When enabled, configured model URLs will point to this proxy instead of directly to CLIProxyAPI."
+        },
+        "antigravityCopilot.proxy.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Bind host for the throttling proxy server"
+        },
+        "antigravityCopilot.proxy.port": {
+          "type": "number",
+          "default": 8320,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Bind port for the throttling proxy server"
+        },
+        "antigravityCopilot.proxy.rewriteMaxTokens": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, the proxy will clamp max output tokens in requests to reduce long generations that often trigger upstream 429s."
+        },
+        "antigravityCopilot.proxy.maxTokensThinking": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 256,
+          "maximum": 8192,
+          "description": "Maximum output tokens to allow for Thinking models when proxy rewriting is enabled"
+        },
+        "antigravityCopilot.proxy.maxTokensStandard": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 256,
+          "maximum": 8192,
+          "description": "Maximum output tokens to allow for non-Thinking models when proxy rewriting is enabled"
+        },
+        "antigravityCopilot.proxy.logRequests": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log proxy request metadata (model, endpoint, token limits, status, duration). Does NOT log prompt text."
+        },
+        "antigravityCopilot.proxy.transformThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Transform streaming responses from Thinking models to annotate reasoning_content for better client display"
+        },
+        "antigravityCopilot.proxy.thinkingTransformMode": {
+          "type": "string",
+          "enum": [
+            "annotate",
+            "enhanced",
+            "claude"
+          ],
+          "default": "annotate",
+          "description": "Transform mode for thinking content in streaming responses",
+          "enumDescriptions": [
+            "Minimal: Add _is_thinking markers to delta objects",
+            "Enhanced: Add comprehensive thinking block markers in OpenAI format",
+            "Claude: Full conversion to Anthropic/Claude streaming format (experimental)"
+          ]
         }
       }
     },

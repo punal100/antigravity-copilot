@@ -184,11 +184,24 @@ export async function fetchModelsFromServer(host: string, port: number): Promise
 
                     for (const model of response.data) {
                         const modelId = model.id;
+                        const serverUrl = `http://${host}:${port}/v1`;
+
+                        // Prefer known, curated model specs where available.
+                        // This avoids advertising unrealistic token limits that can cause immediate upstream 429s.
+                        const known = ANTIGRAVITY_MODELS[modelId];
+                        if (known) {
+                            models[modelId] = {
+                                ...known,
+                                url: serverUrl,
+                                model: modelId,
+                            };
+                            continue;
+                        }
+
                         const displayName = formatModelName(modelId);
-                        
                         models[modelId] = {
                             name: `Antigravity: ${displayName}`,
-                            url: `http://${host}:${port}/v1`,
+                            url: serverUrl,
                             model: modelId,
                             toolCalling: inferToolCalling(modelId),
                             vision: inferVision(modelId),
@@ -275,7 +288,10 @@ const MODEL_SPECS = {
         default: { context: 128000, output: 4096 }
     },
     thinking: {
-        outputMultiplier: 8  // Thinking models get 8x output (64k)
+        // Keep thinking outputs conservative.
+        // Advertising huge max output tokens can cause Copilot to request overly large generations,
+        // which quickly trips upstream provider quotas (429 RESOURCE_EXHAUSTED).
+        maxOutput: 8192
     },
     fallback: {
         context: 128000,
@@ -311,22 +327,18 @@ function inferContextWindow(modelId: string): number {
  */
 function inferMaxOutputTokens(modelId: string): number {
     const id = modelId.toLowerCase();
-    const baseOutput = MODEL_SPECS.fallback.output;
 
-    // Thinking models get multiplied output
+    const familyBase = id.includes('gemini')
+        ? MODEL_SPECS.gemini.default.output
+        : id.includes('claude')
+            ? MODEL_SPECS.claude.default.output
+            : MODEL_SPECS.fallback.output;
+
     if (id.includes('thinking')) {
-        return baseOutput * MODEL_SPECS.thinking.outputMultiplier;
+        return Math.min(familyBase, MODEL_SPECS.thinking.maxOutput);
     }
 
-    if (id.includes('gemini')) {
-        return MODEL_SPECS.gemini.default.output;
-    }
-
-    if (id.includes('claude')) {
-        return MODEL_SPECS.claude.default.output;
-    }
-
-    return baseOutput;
+    return familyBase;
 }
 
 /**

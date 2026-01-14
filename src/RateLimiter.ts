@@ -74,7 +74,7 @@ export class RateLimiter implements vscode.Disposable {
      * Check if a request can proceed. Returns true if allowed, false if blocked.
      * Shows a notification to the user if blocked.
      */
-    public canProceed(modelName?: string): boolean {
+    public canProceed(modelName?: string, notify: boolean = true): boolean {
         const config = this.getConfig();
         
         if (!config.enabled) {
@@ -87,7 +87,7 @@ export class RateLimiter implements vscode.Disposable {
         // Check if busy with another request
         if (status.isBusy) {
             this.logInfo(`Request blocked: Antigravity is busy with another request`);
-            if (config.showNotifications) {
+            if (notify && config.showNotifications) {
                 this.showBusyNotification();
             }
             return false;
@@ -97,13 +97,35 @@ export class RateLimiter implements vscode.Disposable {
         if (status.isInCooldown) {
             const secondsRemaining = Math.ceil(status.remainingCooldownMs / 1000);
             this.logInfo(`Request blocked: Cooldown active (${secondsRemaining}s remaining)`);
-            if (config.showNotifications) {
+            if (notify && config.showNotifications) {
                 this.showCooldownNotification(secondsRemaining, isThinkingModel);
             }
             return false;
         }
 
         return true;
+    }
+
+    /**
+     * Wait until a request can proceed, honoring busy + cooldown.
+     * This is intended for internal automation (e.g. a local throttling proxy),
+     * so it does not spam UI notifications.
+     */
+    public async waitUntilCanProceed(modelName?: string, timeoutMs: number = 120000): Promise<void> {
+        const start = Date.now();
+        while (!this.canProceed(modelName, false)) {
+            const status = this.getStatus();
+            const remaining = Math.max(0, timeoutMs - (Date.now() - start));
+            if (remaining <= 0) {
+                throw new Error('Timed out waiting for rate limiter');
+            }
+
+            // Sleep for either the remaining cooldown, or a short polling interval.
+            const sleepMs = status.isInCooldown
+                ? Math.min(status.remainingCooldownMs, 1000)
+                : 250;
+            await new Promise(resolve => setTimeout(resolve, Math.min(sleepMs, remaining)));
+        }
     }
 
     /**

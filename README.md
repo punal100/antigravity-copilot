@@ -125,6 +125,30 @@ Rate limiting helps prevent 429 errors when using resource-intensive thinking mo
 | `rateLimit.intensity`         | `standard` | Mode: `standard` (15s) or `thinking` (30s) |
 | `rateLimit.showNotifications` | `true`     | Show notifications when blocked            |
 
+### Proxy Settings
+
+The optional throttling proxy queues requests to prevent upstream 429 errors with thinking models.
+
+| Setting                       | Default     | Description                                         |
+| ----------------------------- | ----------- | --------------------------------------------------- |
+| `proxy.enabled`               | `true`      | Enable the local throttling proxy                   |
+| `proxy.host`                  | `127.0.0.1` | Proxy bind host                                     |
+| `proxy.port`                  | `8320`      | Proxy bind port                                     |
+| `proxy.rewriteMaxTokens`      | `true`      | Clamp output tokens to reduce long generations      |
+| `proxy.maxTokensThinking`     | `2048`      | Max output tokens for Thinking models               |
+| `proxy.maxTokensStandard`     | `4096`      | Max output tokens for standard models               |
+| `proxy.logRequests`           | `true`      | Log request metadata (model, status, duration)      |
+| `proxy.transformThinking`     | `true`      | Transform streaming responses for thinking display  |
+| `proxy.thinkingTransformMode` | `annotate`  | Transform mode: `annotate`, `enhanced`, or `claude` |
+
+#### Thinking Transform Modes
+
+The proxy can transform streaming responses from Thinking models to help clients display reasoning content:
+
+- **`annotate`** (default): Adds minimal `_is_thinking` markers to delta objects
+- **`enhanced`**: Adds comprehensive thinking block markers in OpenAI format
+- **`claude`**: Full conversion to Anthropic/Claude streaming format (experimental)
+
 ### Example settings.json
 
 ```json
@@ -133,7 +157,8 @@ Rate limiting helps prevent 429 errors when using resource-intensive thinking mo
   "antigravityCopilot.autoConfigureCopilot": true,
   "antigravityCopilot.showNotifications": true,
   "antigravityCopilot.rateLimit.enabled": true,
-  "antigravityCopilot.rateLimit.intensity": "thinking"
+  "antigravityCopilot.rateLimit.intensity": "thinking",
+  "antigravityCopilot.proxy.enabled": true
 }
 ```
 
@@ -177,6 +202,31 @@ Access commands via Command Palette (`Ctrl+Shift+P`):
 - Increase cooldown if errors persist: `antigravityCopilot.rateLimit.cooldownMs: 30000`
 - Check rate limiter status via Command Palette → "Antigravity: Rate Limit Status"
 - Reset the rate limiter from the sidebar dashboard if needed
+
+#### If 429 happens repeatedly with Thinking models
+
+Copilot Chat can send multiple requests per prompt (tools, retries, follow-ups). For resource-intensive **Thinking** models, this can trip upstream quota/throttling even if you only clicked once.
+
+This extension includes an **optional local throttling proxy** that queues requests before they reach CLIProxyAPI. It does not modify Copilot internals; it simply changes the BYOK endpoint URL Copilot uses.
+
+1. Enable the proxy:
+   - `antigravityCopilot.proxy.enabled: true`
+2. Re-run **Antigravity: Configure Models**, then reload VS Code.
+3. Use a longer cooldown for thinking models (start with 30–60s):
+   - `antigravityCopilot.rateLimit.intensity: "thinking"`
+   - `antigravityCopilot.rateLimit.cooldownMs: 60000`
+
+If you still see `RESOURCE_EXHAUSTED` immediately, your Antigravity account/model quota may be exhausted; switch to a lighter model or wait for quota reset.
+
+#### Diagnosing 429s (proxy request logging)
+
+If you want to understand _why_ 429s happen (bursting, large requested outputs, etc.), you can enable proxy request logging.
+
+- Setting: `antigravityCopilot.proxy.logRequests: true`
+- What it logs: request metadata only (endpoint, model, token limits, status code, duration)
+- What it does **not** log: your prompt text or chat content
+
+Open the **Antigravity** output channel to view `[PROXY ...]` log lines.
 
 ## 🛠️ Building from Source
 
@@ -274,9 +324,13 @@ This extension explicitly does **NOT**:
 - ❌ Modify GitHub Copilot internals or files
 - ❌ Host or redistribute any AI models
 - ❌ Collect, store, or transmit user credentials
-- ❌ Intercept or proxy Copilot traffic
+- ❌ Intercept or proxy GitHub Copilot’s own service traffic
 - ❌ Provide access to Antigravity (users must obtain access independently)
 - ❌ Connect to any internal/private services
+
+Notes:
+
+- ✅ If you enable `antigravityCopilot.proxy.enabled`, the extension runs an optional _local_ throttling proxy **only for the BYOK endpoint you configured** (Copilot → your local endpoint). This is used to queue requests and reduce upstream 429s.
 
 ## Credits
 

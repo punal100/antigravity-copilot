@@ -3,17 +3,25 @@ import { AntigravityServer } from './AntigravityServer';
 import { SidebarProvider } from './SidebarProvider';
 import { ANTIGRAVITY_MODELS, fetchModelsFromServer } from './models';
 import { RateLimiter } from './RateLimiter';
+import { ThrottlingProxyServer, ThrottlingProxyConfig } from './ThrottlingProxyServer';
 
 let server: AntigravityServer | undefined;
 let rateLimiter: RateLimiter | undefined;
+let proxyServer: ThrottlingProxyServer | undefined;
+let outputChannel: vscode.OutputChannel | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     const output = vscode.window.createOutputChannel('Antigravity');
+    outputChannel = output;
     context.subscriptions.push(output);
 
     // Initialize rate limiter
     rateLimiter = RateLimiter.getInstance(output);
     context.subscriptions.push(rateLimiter);
+
+    // Optional throttling proxy (queues/copilots requests to avoid upstream 429s)
+    proxyServer = new ThrottlingProxyServer(output, rateLimiter);
+    context.subscriptions.push(proxyServer);
 
     const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     statusItem.command = 'antigravity-copilot.showServerControls';
@@ -287,6 +295,29 @@ export function activate(context: vscode.ExtensionContext) {
         });
     }
 
+    // Start throttling proxy if enabled
+    void startProxyIfEnabled(output).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        output.appendLine(`[ERROR] Failed to start throttling proxy: ${message}`);
+    });
+
+    // Restart proxy when relevant settings change
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((e: vscode.ConfigurationChangeEvent) => {
+            if (
+                e.affectsConfiguration('antigravityCopilot.proxy') ||
+                e.affectsConfiguration('antigravityCopilot.rateLimit') ||
+                e.affectsConfiguration('antigravityCopilot.server.host') ||
+                e.affectsConfiguration('antigravityCopilot.server.port')
+            ) {
+                void startProxyIfEnabled(output).catch((error: unknown) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    output.appendLine(`[ERROR] Failed to restart throttling proxy: ${message}`);
+                });
+            }
+        })
+    );
+
     // Auto-configure models if enabled
     const autoConfigureCopilot = vscode.workspace.getConfiguration('antigravityCopilot').get<boolean>('autoConfigureCopilot', true);
     if (autoConfigureCopilot) {
@@ -294,11 +325,49 @@ export function activate(context: vscode.ExtensionContext) {
     }
 }
 
+async function startProxyIfEnabled(output: vscode.OutputChannel): Promise<void> {
+    if (!proxyServer) {
+        return;
+    }
+
+    const proxyCfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
+    const serverCfg = vscode.workspace.getConfiguration('antigravityCopilot.server');
+
+    const enabled = proxyCfg.get<boolean>('enabled', false);
+    if (!enabled) {
+        await proxyServer.stop();
+        return;
+    }
+
+    const cfg: ThrottlingProxyConfig = {
+        enabled: true,
+        host: proxyCfg.get<string>('host', '127.0.0.1'),
+        port: proxyCfg.get<number>('port', 8320),
+        upstreamHost: serverCfg.get<string>('host', '127.0.0.1'),
+        upstreamPort: serverCfg.get<number>('port', 8317),
+    };
+
+    await proxyServer.start(cfg);
+    output.appendLine(`[DEBUG] Proxy enabled. Base URL: http://${cfg.host}:${cfg.port}/v1`);
+}
+
 async function configureAntigravityModels(silent: boolean = false): Promise<void> {
     try {
         const serverConfig = vscode.workspace.getConfiguration('antigravityCopilot.server');
         const host = serverConfig.get<string>('host', '127.0.0.1');
         const port = serverConfig.get<number>('port', 8317);
+
+        // Determine which base URL Copilot should use.
+        const proxyConfig = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
+        const proxyEnabled = proxyConfig.get<boolean>('enabled', false);
+        const proxyHost = proxyConfig.get<string>('host', '127.0.0.1');
+        const proxyPort = proxyConfig.get<number>('port', 8320);
+        const baseUrl = proxyEnabled ? `http://${proxyHost}:${proxyPort}/v1` : `http://${host}:${port}/v1`;
+
+        // Ensure the proxy is running before pointing Copilot at it.
+        if (proxyEnabled && outputChannel) {
+            await startProxyIfEnabled(outputChannel);
+        }
 
         let models: Record<string, unknown>;
 
@@ -316,6 +385,9 @@ async function configureAntigravityModels(silent: boolean = false): Promise<void
             }
             models = ANTIGRAVITY_MODELS;
         }
+
+        // Ensure all configured model URLs point at the chosen base URL (direct or proxy).
+        models = rewriteModelUrls(models, baseUrl);
 
         const config = vscode.workspace.getConfiguration('github.copilot');
         const existingModels = config.get<Record<string, unknown>>('chat.customOAIModels', {});
@@ -341,6 +413,18 @@ async function configureAntigravityModels(silent: boolean = false): Promise<void
         const message = error instanceof Error ? error.message : String(error);
         vscode.window.showErrorMessage(`Failed to configure models: ${message}`);
     }
+}
+
+function rewriteModelUrls(models: Record<string, unknown>, baseUrl: string): Record<string, unknown> {
+    const updated: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(models)) {
+        if (value && typeof value === 'object' && 'url' in value) {
+            updated[key] = { ...(value as any), url: baseUrl };
+        } else {
+            updated[key] = value;
+        }
+    }
+    return updated;
 }
 
 export function deactivate() {
