@@ -2,12 +2,18 @@ import * as vscode from 'vscode';
 import { AntigravityServer } from './AntigravityServer';
 import { SidebarProvider } from './SidebarProvider';
 import { ANTIGRAVITY_MODELS, fetchModelsFromServer } from './models';
+import { RateLimiter } from './RateLimiter';
 
 let server: AntigravityServer | undefined;
+let rateLimiter: RateLimiter | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     const output = vscode.window.createOutputChannel('Antigravity');
     context.subscriptions.push(output);
+
+    // Initialize rate limiter
+    rateLimiter = RateLimiter.getInstance(output);
+    context.subscriptions.push(rateLimiter);
 
     const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     statusItem.command = 'antigravity-copilot.showServerControls';
@@ -66,8 +72,11 @@ export function activate(context: vscode.ExtensionContext) {
         return srv;
     };
 
+    // Rate Limiter Getter
+    const getRateLimiter = (): RateLimiter | undefined => rateLimiter;
+
     // Register Sidebar Provider
-    const sidebarProvider = new SidebarProvider(context.extensionUri, getServer);
+    const sidebarProvider = new SidebarProvider(context.extensionUri, getServer, getRateLimiter);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebarProvider)
     );
@@ -170,6 +179,24 @@ export function activate(context: vscode.ExtensionContext) {
             description: 'Configure extension settings'
         });
 
+        // Add rate limit status
+        items.push({ label: '', kind: vscode.QuickPickItemKind.Separator });
+        const rlStatus = rateLimiter?.getStatus();
+        if (rlStatus) {
+            const rlIcon = rlStatus.isBusy ? '$(sync~spin)' : (rlStatus.isInCooldown ? '$(clock)' : '$(check)');
+            const rlText = rlStatus.isBusy ? 'Busy' : (rlStatus.isInCooldown ? `Cooldown (${Math.ceil(rlStatus.remainingCooldownMs / 1000)}s)` : 'Ready');
+            items.push({
+                label: `${rlIcon} Rate Limit Status`,
+                description: `${rlText} | ${rlStatus.intensity} mode`
+            });
+            if (rlStatus.isBusy || rlStatus.isInCooldown) {
+                items.push({
+                    label: '$(refresh) Reset Rate Limiter',
+                    description: 'Clear cooldown and allow requests'
+                });
+            }
+        }
+
         const selection = await vscode.window.showQuickPick(items, {
             placeHolder: 'Manage Antigravity Server',
             title: 'Antigravity Controls'
@@ -193,6 +220,41 @@ export function activate(context: vscode.ExtensionContext) {
             await vscode.commands.executeCommand('antigravity-copilot.sidebarView.focus');
         } else if (selection.label.includes('Open Settings')) {
             await vscode.commands.executeCommand('workbench.action.openSettings', 'antigravityCopilot');
+        } else if (selection.label.includes('Rate Limit Status')) {
+            await vscode.commands.executeCommand('antigravity-copilot.rateLimitStatus');
+        } else if (selection.label.includes('Reset Rate Limiter')) {
+            rateLimiter?.reset();
+            vscode.window.showInformationMessage('Rate limiter reset successfully');
+        }
+    });
+
+    // Rate Limit Status Command
+    const rateLimitStatusCommand = vscode.commands.registerCommand('antigravity-copilot.rateLimitStatus', async () => {
+        if (!rateLimiter) {
+            vscode.window.showErrorMessage('Rate limiter not initialized');
+            return;
+        }
+
+        const status = rateLimiter.getStatus();
+        const statusIcon = status.isBusy ? '$(sync~spin)' : (status.isInCooldown ? '$(clock)' : '$(check)');
+        const statusText = status.isBusy ? 'Busy' : (status.isInCooldown ? `Cooldown (${Math.ceil(status.remainingCooldownMs / 1000)}s)` : 'Ready');
+        
+        const message = `**Rate Limiter Status**\n\n` +
+            `| Status | ${statusIcon} ${statusText} |\n` +
+            `| Intensity | ${status.intensity} |\n` +
+            `| Cooldown | ${status.cooldownMs / 1000}s |`;
+
+        const selection = await vscode.window.showInformationMessage(
+            `Rate Limiter: ${statusText} | Intensity: ${status.intensity} | Cooldown: ${status.cooldownMs / 1000}s`,
+            'Reset',
+            'Open Settings'
+        );
+
+        if (selection === 'Reset') {
+            rateLimiter.reset();
+            vscode.window.showInformationMessage('Rate limiter reset successfully');
+        } else if (selection === 'Open Settings') {
+            vscode.commands.executeCommand('workbench.action.openSettings', 'antigravityCopilot.rateLimit');
         }
     });
 
@@ -202,7 +264,8 @@ export function activate(context: vscode.ExtensionContext) {
         restartServerCommand,
         loginCommand,
         configureModelsCommand,
-        showServerControlsCommand
+        showServerControlsCommand,
+        rateLimitStatusCommand
     );
 
     // Initial status bar update

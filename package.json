@@ -2,7 +2,7 @@
   "name": "antigravity-copilot",
   "displayName": "Antigravity for Copilot",
   "description": "Use Google Antigravity models (Claude, Gemini) in GitHub Copilot Chat via CLIProxyAPI",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "punal100",
   "icon": "media/icon.png",
   "engines": {
@@ -57,6 +57,11 @@
         "command": "antigravity-copilot.loginAntigravity",
         "title": "Login to Antigravity",
         "category": "Antigravity"
+      },
+      {
+        "command": "antigravity-copilot.rateLimitStatus",
+        "title": "Rate Limit Status",
+        "category": "Antigravity"
       }
     ],
     "configuration": {
@@ -96,6 +101,36 @@
           "type": "boolean",
           "default": true,
           "description": "Show notifications for server events"
+        },
+        "antigravityCopilot.rateLimit.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable rate limiting to prevent 429 errors with Antigravity models"
+        },
+        "antigravityCopilot.rateLimit.cooldownMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 1000,
+          "maximum": 120000,
+          "description": "Cooldown period in milliseconds between requests (default: 15000ms for standard, 30000ms for thinking)"
+        },
+        "antigravityCopilot.rateLimit.intensity": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "thinking"
+          ],
+          "default": "standard",
+          "description": "Request intensity mode. 'standard' uses shorter cooldowns, 'thinking' uses longer cooldowns to prevent rate limits on heavy models",
+          "enumDescriptions": [
+            "Standard mode with 15 second cooldowns",
+            "Thinking mode with 30 second cooldowns for resource-intensive models"
+          ]
+        },
+        "antigravityCopilot.rateLimit.showNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show notifications when requests are blocked due to rate limiting"
         }
       }
     },

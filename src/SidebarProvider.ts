@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AntigravityServer } from './AntigravityServer';
 import { MODEL_LIST } from './models';
+import { RateLimiter } from './RateLimiter';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'antigravity-copilot.sidebarView';
@@ -10,7 +11,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
-        private readonly _getServer: () => AntigravityServer
+        private readonly _getServer: () => AntigravityServer,
+        private readonly _getRateLimiter?: () => RateLimiter | undefined
     ) {
         this._server = _getServer();
     }
@@ -75,6 +77,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'showLogs':
                 await vscode.commands.executeCommand('workbench.action.output.toggleOutput');
                 break;
+            case 'resetRateLimiter':
+                this._getRateLimiter?.()?.reset();
+                await this._updateWebview();
+                break;
+            case 'openRateLimitSettings':
+                await vscode.commands.executeCommand('workbench.action.openSettings', 'antigravityCopilot.rateLimit');
+                break;
             case 'openExternal': {
                 const url = typeof data.value === 'string' ? data.value : undefined;
                 if (!url) {
@@ -98,6 +107,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private async _getHtml(): Promise<string> {
         const status = this._server.getStatus();
         const isRunning = status.running;
+        
+        // Get rate limiter status
+        const rlStatus = this._getRateLimiter?.()?.getStatus();
+        const rlStatusText = rlStatus?.isBusy ? '🔄 Busy' : (rlStatus?.isInCooldown ? `⏳ Cooldown (${Math.ceil((rlStatus?.remainingCooldownMs || 0) / 1000)}s)` : '✅ Ready');
+        const rlStatusColor = rlStatus?.isBusy ? '#f59e0b' : (rlStatus?.isInCooldown ? '#3b82f6' : '#22c55e');
 
         const resources = {
             repository: 'https://github.com/punal100/antigravity-copilot',
@@ -349,6 +363,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
 
+    ${rlStatus ? `
+    <div class="card">
+        <h3>⚡ Rate Limiter</h3>
+        <div class="info-row">
+            <span class="info-label">Status</span>
+            <span class="info-value" style="color: ${rlStatusColor}">${rlStatusText}</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Mode</span>
+            <span class="info-value">${rlStatus.intensity === 'thinking' ? '🧠 Thinking' : '⚡ Standard'}</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Cooldown</span>
+            <span class="info-value">${rlStatus.cooldownMs / 1000}s</span>
+        </div>
+        <div style="margin-top: 12px; display: flex; gap: 8px;">
+            ${rlStatus.isBusy || rlStatus.isInCooldown ? `
+                <button class="btn btn-secondary" style="flex: 1;" onclick="resetRateLimiter()">🔄 Reset</button>
+            ` : ''}
+            <button class="btn btn-secondary" style="flex: 1;" onclick="openRateLimitSettings()">⚙️ Settings</button>
+        </div>
+    </div>
+    ` : ''}
+
     <div class="card">
         <h3>🤖 Available Models (10)</h3>
         <div class="model-list">
@@ -434,6 +472,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         function showLogs() {
             vscode.postMessage({ type: 'showLogs' });
+        }
+
+        function resetRateLimiter() {
+            vscode.postMessage({ type: 'resetRateLimiter' });
+        }
+
+        function openRateLimitSettings() {
+            vscode.postMessage({ type: 'openRateLimitSettings' });
         }
 
         function openExternal(url) {
