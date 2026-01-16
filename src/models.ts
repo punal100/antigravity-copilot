@@ -40,8 +40,8 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
         "toolCalling": true,
         "vision": false,
         "thinking": true,
-        "maxInputTokens": 128000,
-        "maxOutputTokens": 4096,
+        "maxInputTokens": 32000,
+        "maxOutputTokens": 2048,
         "requiresAPIKey": false
     },
     "gemini-claude-opus-4-5-thinking": {
@@ -51,8 +51,8 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
         "toolCalling": true,
         "vision": false,
         "thinking": true,
-        "maxInputTokens": 128000,
-        "maxOutputTokens": 4096,
+        "maxInputTokens": 32000,
+        "maxOutputTokens": 2048,
         "requiresAPIKey": false
     },
     "gemini-2.5-flash": {
@@ -288,10 +288,11 @@ const MODEL_SPECS = {
         default: { context: 128000, output: 4096 }
     },
     thinking: {
-        // Keep thinking outputs conservative.
-        // Advertising huge max output tokens can cause Copilot to request overly large generations,
+        // Keep thinking context and outputs very conservative.
+        // Advertising huge token limits causes Copilot to request overly large generations,
         // which quickly trips upstream provider quotas (429 RESOURCE_EXHAUSTED).
-        maxOutput: 8192
+        maxContext: 32000,
+        maxOutput: 2048
     },
     fallback: {
         context: 128000,
@@ -304,6 +305,11 @@ const MODEL_SPECS = {
  */
 function inferContextWindow(modelId: string): number {
     const id = modelId.toLowerCase();
+    
+    // Thinking models get reduced context to avoid quota exhaustion
+    if (id.includes('thinking')) {
+        return MODEL_SPECS.thinking.maxContext;
+    }
     
     if (id.includes('gemini')) {
         if (id.includes('flash')) return MODEL_SPECS.gemini.flash.context;
@@ -328,24 +334,27 @@ function inferContextWindow(modelId: string): number {
 function inferMaxOutputTokens(modelId: string): number {
     const id = modelId.toLowerCase();
 
-    const familyBase = id.includes('gemini')
-        ? MODEL_SPECS.gemini.default.output
-        : id.includes('claude')
-            ? MODEL_SPECS.claude.default.output
-            : MODEL_SPECS.fallback.output;
-
+    // Thinking models get strict output limit
     if (id.includes('thinking')) {
-        return Math.min(familyBase, MODEL_SPECS.thinking.maxOutput);
+        return MODEL_SPECS.thinking.maxOutput;
     }
 
-    return familyBase;
+    if (id.includes('gemini')) {
+        return MODEL_SPECS.gemini.default.output;
+    }
+    
+    if (id.includes('claude')) {
+        return MODEL_SPECS.claude.default.output;
+    }
+
+    return MODEL_SPECS.fallback.output;
 }
 
 /**
  * Infer if a model supports tool calling based on its ID
  */
 function inferToolCalling(modelId: string): boolean {
-    const noToolModels = ['gpt-oss', 'basic', 'lite'];
+    const noToolModels = ['gpt-oss', 'basic'];
     return !noToolModels.some(pattern => modelId.toLowerCase().includes(pattern));
 }
 

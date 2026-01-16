@@ -12,6 +12,10 @@ export class RateLimiter implements vscode.Disposable {
     private _lastRequestTime = 0;
     private _cooldownTimeoutId: NodeJS.Timeout | undefined;
     private _pendingRequests = 0;
+    /** Tracks consecutive 429 errors for exponential backoff */
+    private _consecutive429Count = 0;
+    /** The actual cooldown being enforced (may be extended after 429s) */
+    private _effectiveCooldownMs = 0;
     
     private readonly _onDidChangeStatus = new vscode.EventEmitter<RateLimiterStatus>();
     public readonly onDidChangeStatus = this._onDidChangeStatus.event;
@@ -38,7 +42,9 @@ export class RateLimiter implements vscode.Disposable {
         const config = this.getConfig();
         const now = Date.now();
         const timeSinceLastRequest = now - this._lastRequestTime;
-        const remainingCooldown = Math.max(0, config.cooldownMs - timeSinceLastRequest);
+        // Use effective cooldown (which may be extended after 429s)
+        const activeCooldown = this._effectiveCooldownMs || config.cooldownMs;
+        const remainingCooldown = Math.max(0, activeCooldown - timeSinceLastRequest);
         
         return {
             isBusy: this._isBusy,
@@ -46,8 +52,8 @@ export class RateLimiter implements vscode.Disposable {
             remainingCooldownMs: remainingCooldown,
             pendingRequests: this._pendingRequests,
             lastRequestTime: this._lastRequestTime,
-            cooldownMs: config.cooldownMs,
-            intensity: config.intensity
+            cooldownMs: activeCooldown,
+            consecutive429Count: this._consecutive429Count
         };
     }
 
@@ -56,16 +62,11 @@ export class RateLimiter implements vscode.Disposable {
      */
     private getConfig(): RateLimiterConfig {
         const config = vscode.workspace.getConfiguration('antigravityCopilot.rateLimit');
-        const intensity = config.get<'standard' | 'thinking'>('intensity', 'standard');
-        
-        // Different cooldowns based on intensity
-        const defaultCooldownMs = intensity === 'thinking' ? 30000 : 15000;
-        const cooldownMs = config.get<number>('cooldownMs', defaultCooldownMs);
+        const cooldownMs = config.get<number>('cooldownMs', 15000);
         
         return {
             enabled: config.get<boolean>('enabled', true),
             cooldownMs,
-            intensity,
             showNotifications: config.get<boolean>('showNotifications', true)
         };
     }
@@ -150,10 +151,15 @@ export class RateLimiter implements vscode.Disposable {
         this._pendingRequests = Math.max(0, this._pendingRequests - 1);
         
         const config = this.getConfig();
+        const was429 = error && this.isRateLimitError(error);
         
-        // Handle rate limit errors
-        if (error && this.isRateLimitError(error)) {
+        // Handle rate limit errors with exponential backoff
+        if (was429) {
+            this._consecutive429Count++;
             this.handleRateLimitError();
+        } else {
+            // Successful request resets the 429 counter
+            this._consecutive429Count = 0;
         }
 
         // Clear any existing cooldown timeout
@@ -161,13 +167,26 @@ export class RateLimiter implements vscode.Disposable {
             clearTimeout(this._cooldownTimeoutId);
         }
 
+        // Calculate effective cooldown:
+        // - Base cooldown from config
+        // - After 429: double the cooldown for each consecutive 429 (capped at 5 minutes)
+        let cooldown = config.cooldownMs;
+        if (was429) {
+            // Exponential backoff: base * 2^(consecutive-1), capped at 300s
+            const backoffMultiplier = Math.pow(2, Math.min(this._consecutive429Count, 5));
+            cooldown = Math.min(cooldown * backoffMultiplier, 300000);
+        }
+        this._effectiveCooldownMs = cooldown;
+        this._lastRequestTime = Date.now();
+
         // Set up cooldown
         this._cooldownTimeoutId = setTimeout(() => {
+            this._effectiveCooldownMs = 0; // Reset to base cooldown
             this.logInfo('Cooldown period ended');
             this._onDidChangeStatus.fire(this.getStatus());
-        }, config.cooldownMs);
+        }, cooldown);
 
-        this.logInfo(`Request ended. Cooldown: ${config.cooldownMs}ms`);
+        this.logInfo(`Request ended. Cooldown: ${cooldown}ms${was429 ? ` (backoff x${Math.pow(2, Math.min(this._consecutive429Count, 5))})` : ''}`);
         this._onDidChangeStatus.fire(this.getStatus());
     }
 
@@ -193,12 +212,15 @@ export class RateLimiter implements vscode.Disposable {
      */
     private handleRateLimitError(): void {
         const config = this.getConfig();
+        const backoffMultiplier = Math.pow(2, Math.min(this._consecutive429Count, 5));
+        const extendedCooldown = Math.min(config.cooldownMs * backoffMultiplier, 300000);
         
-        this.logInfo('Rate limit error detected (429)');
+        this.logInfo(`Rate limit error detected (429). Consecutive: ${this._consecutive429Count}. Next cooldown: ${extendedCooldown}ms`);
         
         if (config.showNotifications) {
+            const waitSeconds = Math.ceil(extendedCooldown / 1000);
             void vscode.window.showWarningMessage(
-                'Antigravity rate limit reached. Please wait before sending another request.',
+                `Antigravity rate limit reached (429). Waiting ${waitSeconds}s before next request.`,
                 'Open Settings'
             ).then(selection => {
                 if (selection === 'Open Settings') {
@@ -206,9 +228,6 @@ export class RateLimiter implements vscode.Disposable {
                 }
             });
         }
-
-        // Double the cooldown on rate limit errors
-        this._lastRequestTime = Date.now() - (config.cooldownMs / 2);
     }
 
     /**
@@ -247,6 +266,8 @@ export class RateLimiter implements vscode.Disposable {
         this._isBusy = false;
         this._lastRequestTime = 0;
         this._pendingRequests = 0;
+        this._consecutive429Count = 0;
+        this._effectiveCooldownMs = 0;
         
         if (this._cooldownTimeoutId) {
             clearTimeout(this._cooldownTimeoutId);
@@ -281,10 +302,10 @@ export interface RateLimiterStatus {
     pendingRequests: number;
     /** Timestamp of last request */
     lastRequestTime: number;
-    /** Current cooldown duration in ms */
+    /** Current cooldown duration in ms (may be extended after 429s) */
     cooldownMs: number;
-    /** Current intensity setting */
-    intensity: 'standard' | 'thinking';
+    /** Number of consecutive 429 errors (for exponential backoff) */
+    consecutive429Count: number;
 }
 
 export interface RateLimiterConfig {
@@ -292,8 +313,6 @@ export interface RateLimiterConfig {
     enabled: boolean;
     /** Cooldown period in milliseconds */
     cooldownMs: number;
-    /** Request intensity mode */
-    intensity: 'standard' | 'thinking';
     /** Whether to show notifications */
     showNotifications: boolean;
 }

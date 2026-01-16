@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { AntigravityServer } from './AntigravityServer';
 import { SidebarProvider } from './SidebarProvider';
-import { ANTIGRAVITY_MODELS, fetchModelsFromServer } from './models';
+import { ANTIGRAVITY_MODELS, CopilotModelConfig, fetchModelsFromServer } from './models';
 import { RateLimiter } from './RateLimiter';
 import { ThrottlingProxyServer, ThrottlingProxyConfig } from './ThrottlingProxyServer';
 
@@ -195,7 +195,7 @@ export function activate(context: vscode.ExtensionContext) {
             const rlText = rlStatus.isBusy ? 'Busy' : (rlStatus.isInCooldown ? `Cooldown (${Math.ceil(rlStatus.remainingCooldownMs / 1000)}s)` : 'Ready');
             items.push({
                 label: `${rlIcon} Rate Limit Status`,
-                description: `${rlText} | ${rlStatus.intensity} mode`
+                description: `${rlText} | Cooldown ${rlStatus.cooldownMs / 1000}s`
             });
             if (rlStatus.isBusy || rlStatus.isInCooldown) {
                 items.push({
@@ -244,16 +244,10 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const status = rateLimiter.getStatus();
-        const statusIcon = status.isBusy ? '$(sync~spin)' : (status.isInCooldown ? '$(clock)' : '$(check)');
         const statusText = status.isBusy ? 'Busy' : (status.isInCooldown ? `Cooldown (${Math.ceil(status.remainingCooldownMs / 1000)}s)` : 'Ready');
-        
-        const message = `**Rate Limiter Status**\n\n` +
-            `| Status | ${statusIcon} ${statusText} |\n` +
-            `| Intensity | ${status.intensity} |\n` +
-            `| Cooldown | ${status.cooldownMs / 1000}s |`;
 
         const selection = await vscode.window.showInformationMessage(
-            `Rate Limiter: ${statusText} | Intensity: ${status.intensity} | Cooldown: ${status.cooldownMs / 1000}s`,
+            `Rate Limiter: ${statusText} | Cooldown: ${status.cooldownMs / 1000}s`,
             'Reset',
             'Open Settings'
         );
@@ -352,6 +346,7 @@ async function startProxyIfEnabled(output: vscode.OutputChannel): Promise<void> 
 }
 
 async function configureAntigravityModels(silent: boolean = false): Promise<void> {
+    let baseUrlForUi: string | undefined;
     try {
         const serverConfig = vscode.workspace.getConfiguration('antigravityCopilot.server');
         const host = serverConfig.get<string>('host', '127.0.0.1');
@@ -363,13 +358,14 @@ async function configureAntigravityModels(silent: boolean = false): Promise<void
         const proxyHost = proxyConfig.get<string>('host', '127.0.0.1');
         const proxyPort = proxyConfig.get<number>('port', 8320);
         const baseUrl = proxyEnabled ? `http://${proxyHost}:${proxyPort}/v1` : `http://${host}:${port}/v1`;
+        baseUrlForUi = baseUrl;
 
         // Ensure the proxy is running before pointing Copilot at it.
         if (proxyEnabled && outputChannel) {
             await startProxyIfEnabled(outputChannel);
         }
 
-        let models: Record<string, unknown>;
+        let models: Record<string, CopilotModelConfig>;
 
         // Try to fetch models dynamically from the server
         try {
@@ -389,14 +385,91 @@ async function configureAntigravityModels(silent: boolean = false): Promise<void
         // Ensure all configured model URLs point at the chosen base URL (direct or proxy).
         models = rewriteModelUrls(models, baseUrl);
 
-        const config = vscode.workspace.getConfiguration('github.copilot');
-        const existingModels = config.get<Record<string, unknown>>('chat.customOAIModels', {});
-        
-        // Merge with existing models
-        const updatedModels = { ...existingModels, ...models };
-        
-        await config.update('chat.customOAIModels', updatedModels, vscode.ConfigurationTarget.Global);
-        
+        // Prefer the new Language Models storage (Manage Models → Add Models → OpenAI Compatible).
+        // This avoids writing deprecated/unregistered settings like github.copilot.chat.customOAIModels.
+        const lmCfg = vscode.workspace.getConfiguration('antigravityCopilot.copilot');
+        const providerGroupName = lmCfg.get<string>('providerGroupName', 'Antigravity');
+        const configuredViaLm = await tryConfigureViaLanguageModels(models, { silent, providerGroupName });
+        if (configuredViaLm) {
+            if (!silent) {
+                const selection = await vscode.window.showInformationMessage(
+                    'Antigravity models configured! They should now appear under Copilot Chat → Manage Models.',
+                    'Open Manage Models',
+                    'Reload'
+                );
+                if (selection === 'Open Manage Models') {
+                    void vscode.commands.executeCommand('workbench.action.chat.openLanguageModelsSettings');
+                } else if (selection === 'Reload') {
+                    void vscode.commands.executeCommand('workbench.action.reloadWindow');
+                }
+            }
+            return;
+        }
+
+        // Legacy fallback: older Copilot Chat builds used settings-based configuration.
+        // We keep this path for backward compatibility.
+        const copilotConfig = vscode.workspace.getConfiguration('github.copilot');
+        const candidateSettingKeys = ['chat.customOAIModels', 'chat.customModels'];
+
+        let updatedKey: string | undefined;
+        let lastUpdateError: unknown;
+
+        for (const key of candidateSettingKeys) {
+            const existingModels = copilotConfig.get<Record<string, unknown>>(key, {});
+            const updatedModels = { ...existingModels, ...models };
+
+            try {
+                await copilotConfig.update(key, updatedModels, vscode.ConfigurationTarget.Global);
+                updatedKey = key;
+                break;
+            } catch (updateError) {
+                lastUpdateError = updateError;
+                const msg = updateError instanceof Error ? updateError.message : String(updateError);
+                if (/not a registered configuration/i.test(msg)) {
+                    continue;
+                }
+                throw updateError;
+            }
+        }
+
+        if (!updatedKey) {
+            const raw = lastUpdateError instanceof Error ? lastUpdateError.message : String(lastUpdateError);
+            outputChannel?.appendLine(
+                `[WARN] Copilot BYOK configuration setting not registered. Last error: ${raw}`
+            );
+
+            const msg =
+                'Unable to configure Copilot models automatically because the BYOK setting is not registered in your current VS Code/Copilot environment.\n\n' +
+                'This happens when the “OpenAI Compatible” BYOK feature is not enabled/rolled out for your account, Copilot Chat is missing/disabled, or you are on a Business/Enterprise managed plan where BYOK is unavailable.\n\n' +
+                'Workaround: use the UI flow: Copilot Chat → Model Picker → Manage Models → Add Models → OpenAI Compatible.';
+
+            if (!silent) {
+                const selection = await vscode.window.showErrorMessage(
+                    msg,
+                    'Open Docs',
+                    'Open Extensions',
+                    'Open Manage Models',
+                    'Copy Base URL'
+                );
+                if (selection === 'Open Docs') {
+                    void vscode.env.openExternal(
+                        vscode.Uri.parse(
+                            'https://code.visualstudio.com/docs/copilot/customization/language-models#_bring-your-own-language-model-key'
+                        )
+                    );
+                } else if (selection === 'Open Extensions') {
+                    void vscode.commands.executeCommand('workbench.extensions.search', 'GitHub Copilot Chat');
+                } else if (selection === 'Open Manage Models') {
+                    void vscode.commands.executeCommand('workbench.action.chat.openLanguageModelsSettings');
+                } else if (selection === 'Copy Base URL') {
+                    const url = baseUrlForUi ?? 'http://127.0.0.1:8317/v1';
+                    await vscode.env.clipboard.writeText(url);
+                    void vscode.window.showInformationMessage(`Copied endpoint URL: ${url}`);
+                }
+            }
+            return;
+        }
+
         if (!silent) {
             const selection = await vscode.window.showInformationMessage(
                 'Antigravity models configured! After reload, go to Copilot Chat → Model Picker → Manage Models to enable them.',
@@ -404,27 +477,105 @@ async function configureAntigravityModels(silent: boolean = false): Promise<void
                 'Open Manage Models'
             );
             if (selection === 'Reload') {
-                vscode.commands.executeCommand('workbench.action.reloadWindow');
+                void vscode.commands.executeCommand('workbench.action.reloadWindow');
             } else if (selection === 'Open Manage Models') {
-                vscode.commands.executeCommand('workbench.action.chat.openLanguageModelsSettings');
+                void vscode.commands.executeCommand('workbench.action.chat.openLanguageModelsSettings');
             }
         }
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+
+        // Log the raw error for debugging.
+        outputChannel?.appendLine(`[ERROR] configureAntigravityModels failed: ${message}`);
+
+        // If Copilot's BYOK setting is not registered, don't surface the raw settings error.
+        if (/not a registered configuration/i.test(message) && /custom(oai)?models/i.test(message)) {
+            if (!silent) {
+                const url = baseUrlForUi ?? 'http://127.0.0.1:8317/v1';
+                const selection = await vscode.window.showErrorMessage(
+                    'Copilot BYOK settings are not available in this environment. Use the UI flow: Manage Models → Add Models → OpenAI Compatible, then paste the endpoint URL.',
+                    'Open Manage Models',
+                    'Copy Base URL',
+                    'Open Docs'
+                );
+                if (selection === 'Open Manage Models') {
+                    void vscode.commands.executeCommand('workbench.action.chat.openLanguageModelsSettings');
+                } else if (selection === 'Copy Base URL') {
+                    await vscode.env.clipboard.writeText(url);
+                    void vscode.window.showInformationMessage(`Copied endpoint URL: ${url}`);
+                } else if (selection === 'Open Docs') {
+                    void vscode.env.openExternal(
+                        vscode.Uri.parse(
+                            'https://code.visualstudio.com/docs/copilot/customization/language-models#_bring-your-own-language-model-key'
+                        )
+                    );
+                }
+            }
+            return;
+        }
+
         vscode.window.showErrorMessage(`Failed to configure models: ${message}`);
     }
 }
 
-function rewriteModelUrls(models: Record<string, unknown>, baseUrl: string): Record<string, unknown> {
-    const updated: Record<string, unknown> = {};
+function rewriteModelUrls(models: Record<string, CopilotModelConfig>, baseUrl: string): Record<string, CopilotModelConfig> {
+    const updated: Record<string, CopilotModelConfig> = {};
     for (const [key, value] of Object.entries(models)) {
-        if (value && typeof value === 'object' && 'url' in value) {
-            updated[key] = { ...(value as any), url: baseUrl };
-        } else {
-            updated[key] = value;
-        }
+        updated[key] = { ...value, url: baseUrl };
     }
     return updated;
+}
+
+async function tryConfigureViaLanguageModels(
+    models: Record<string, CopilotModelConfig>,
+    options: { silent: boolean; providerGroupName: string }
+): Promise<boolean> {
+    // This command is provided by VS Code’s Language Models infrastructure.
+    // It is used by Copilot Chat’s BYOK providers to configure provider groups.
+    const commandId = 'lm.migrateLanguageModelsProviderGroup';
+    const providerVendor = 'customoai'; // "OpenAI Compatible" provider in Copilot Chat
+    // Provider group name is user-visible and can be anything.
+    // We default to 'Antigravity' to avoid overwriting other groups.
+    const groupName = options.providerGroupName?.trim() || 'Antigravity';
+
+    const modelConfigs = Object.entries(models).map(([id, cfg]) => ({
+        id,
+        name: cfg.name,
+        url: cfg.url,
+        toolCalling: cfg.toolCalling,
+        vision: cfg.vision,
+        thinking: cfg.thinking,
+        maxInputTokens: cfg.maxInputTokens,
+        maxOutputTokens: cfg.maxOutputTokens,
+    }));
+
+    try {
+        await vscode.commands.executeCommand(commandId, {
+            vendor: providerVendor,
+            name: groupName,
+            models: modelConfigs,
+            // No apiKey required for local OpenAI-compatible endpoints (Copilot Chat accepts empty).
+        });
+        outputChannel?.appendLine(`[INFO] Configured models via Language Models provider group '${groupName}' (vendor: ${providerVendor}).`);
+        return true;
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        outputChannel?.appendLine(`[WARN] Failed to configure via '${commandId}': ${msg}`);
+
+        // If the command is missing or feature isn’t enabled, fall back to legacy path.
+        // (We don't show UI here; caller handles messaging.)
+        if (/command .* not found|unknown command|not a registered command/i.test(msg)) {
+            return false;
+        }
+
+        // In some environments BYOK is disabled; treat that as not-configured.
+        if (/byok|bring your own|not available|not enabled|forbidden|unauthorized/i.test(msg)) {
+            return false;
+        }
+
+        // Other errors might be transient; still allow legacy fallback.
+        return false;
+    }
 }
 
 export function deactivate() {

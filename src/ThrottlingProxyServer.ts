@@ -1,6 +1,7 @@
 import * as http from 'http';
 import * as vscode from 'vscode';
 import { RateLimiter } from './RateLimiter';
+import { ModelConcurrencyManager } from './ConcurrencyQueue';
 import { ThinkingStreamTransformer, OpenAIToClaudeStreamTransformer, ReasoningAnnotatorTransformer } from './ThinkingStreamTransformer';
 
 export interface ThrottlingProxyConfig {
@@ -13,18 +14,35 @@ export interface ThrottlingProxyConfig {
 
 export class ThrottlingProxyServer implements vscode.Disposable {
     private server: http.Server | undefined;
+    private currentConfig: ThrottlingProxyConfig | undefined;
+    private concurrencyManager: ModelConcurrencyManager;
+    private configChangeListener: vscode.Disposable | undefined;
 
     constructor(
         private readonly output: vscode.OutputChannel,
         private readonly rateLimiter: RateLimiter
-    ) {}
+    ) {
+        this.concurrencyManager = new ModelConcurrencyManager(output);
+        
+        // Listen for config changes to update concurrency limits
+        this.configChangeListener = vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('antigravityCopilot.proxy')) {
+                this.concurrencyManager.updateFromConfig();
+            }
+        });
+    }
 
-    public getStatus(): { running: boolean; port?: number; host?: string } {
+    public getStatus(): { running: boolean; port?: number; host?: string; queueStats?: { thinking: import('./ConcurrencyQueue').ConcurrencyQueueStats; standard: import('./ConcurrencyQueue').ConcurrencyQueueStats } } {
         const address = this.server?.address();
         if (!address || typeof address === 'string') {
             return { running: !!this.server };
         }
-        return { running: !!this.server, port: address.port, host: address.address };
+        return { 
+            running: !!this.server, 
+            port: address.port, 
+            host: address.address,
+            queueStats: this.concurrencyManager.getStats()
+        };
     }
 
     public async start(config: ThrottlingProxyConfig): Promise<void> {
@@ -33,7 +51,10 @@ export class ThrottlingProxyServer implements vscode.Disposable {
         }
 
         if (this.server) {
-            return;
+            if (this.currentConfig && isSameConfig(this.currentConfig, config)) {
+                return;
+            }
+            await this.stop();
         }
 
         this.server = http.createServer((req, res) => {
@@ -48,6 +69,8 @@ export class ThrottlingProxyServer implements vscode.Disposable {
             });
         });
 
+        this.currentConfig = { ...config };
+
         const status = this.getStatus();
         this.logInfo(`Throttling proxy started on http://${status.host}:${status.port} -> http://${config.upstreamHost}:${config.upstreamPort}`);
     }
@@ -58,6 +81,7 @@ export class ThrottlingProxyServer implements vscode.Disposable {
         }
         const srv = this.server;
         this.server = undefined;
+        this.currentConfig = undefined;
         await new Promise<void>((resolve) => srv.close(() => resolve()));
         this.logInfo('Throttling proxy stopped');
     }
@@ -77,27 +101,59 @@ export class ThrottlingProxyServer implements vscode.Disposable {
             }
             const body = Buffer.concat(chunks);
 
+            // Guardrail against extremely large prompts (can happen with huge tool output like git diff).
+            // We optionally truncate tool output (below), but still enforce an absolute maximum to avoid
+            // memory issues and accidental runaway requests.
+            const proxyCfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
+            const maxRequestBodyBytes = proxyCfg.get<number>('maxRequestBodyBytes', 10 * 1024 * 1024);
+            if (Number.isFinite(maxRequestBodyBytes) && maxRequestBodyBytes > 0 && body.length > maxRequestBodyBytes) {
+                res.statusCode = 413;
+                res.setHeader('content-type', 'application/json');
+                res.end(JSON.stringify({
+                    error: {
+                        message: 'Request too large',
+                        details: `Request body (${body.length} bytes) exceeds proxy limit (${maxRequestBodyBytes} bytes). Consider reducing tool output/context or enabling tool output truncation.`,
+                    },
+                }));
+                return;
+            }
+
             const modelName = this.tryExtractModelName(req, body);
             const isStreaming = this.isStreamingRequest(body);
             const isThinkingModel = (modelName ?? '').toLowerCase().includes('thinking');
 
-            // Optionally clamp output token request sizes to reduce long generations that frequently
-            // trigger upstream rate limits mid-stream.
-            const rewriteResult = this.tryRewriteTokenLimits(req, body, modelName);
+            // Optionally (1) truncate huge tool output in prompt history and (2) clamp output token requests
+            // to reduce long generations that frequently trigger upstream rate limits mid-stream.
+            const rewriteResult = this.tryRewritePayload(req, body, modelName);
 
             const startedAt = Date.now();
 
-            // Serialize + cooldown using the rate limiter.
-            await this.rateLimiter.waitUntilCanProceed(modelName);
-            this.rateLimiter.startRequest(modelName);
-
-            const forwardResult = await this.forward(req, res, rewriteResult.body, config, {
+            // Use concurrency queue with retry for the forward request.
+            // The queue ensures thinking models have limited concurrency (default: 1)
+            // and retries with exponential backoff + jitter on 429 errors.
+            const forwardResult = await this.concurrencyManager.runRequest(
                 modelName,
-                isStreaming,
-                isThinkingModel,
-            });
-
-            this.rateLimiter.endRequest();
+                async () => {
+                    // Serialize + cooldown using the rate limiter.
+                    await this.rateLimiter.waitUntilCanProceed(modelName);
+                    this.rateLimiter.startRequest(modelName);
+                    
+                    try {
+                        const result = await this.forward(req, res, rewriteResult.body, config, {
+                            modelName,
+                            isStreaming,
+                            isThinkingModel,
+                        });
+                        
+                        this.rateLimiter.endRequest({ status: result.statusCode });
+                        return result;
+                    } catch (err) {
+                        this.rateLimiter.endRequest(err instanceof Error ? err : new Error(String(err)));
+                        throw err;
+                    }
+                },
+                true // enableRetry
+            );
 
             this.logRequestMeta({
                 method: req.method ?? 'GET',
@@ -106,6 +162,7 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                 statusCode: forwardResult.statusCode,
                 durationMs: Date.now() - startedAt,
                 tokenRewrite: rewriteResult.meta,
+                toolTruncation: rewriteResult.toolTruncation,
                 upstreamErrorSnippet: forwardResult.errorSnippet,
             });
         } catch (error) {
@@ -162,12 +219,18 @@ export class ThrottlingProxyServer implements vscode.Disposable {
         body: Buffer,
         modelName?: string
     ): { body: Buffer; meta?: TokenRewriteMeta } {
+        // Kept for compatibility in case external code references it.
+        // New logic lives in tryRewritePayload().
+        return this.tryRewritePayload(req, body, modelName);
+    }
+
+    private tryRewritePayload(
+        req: http.IncomingMessage,
+        body: Buffer,
+        modelName?: string
+    ): { body: Buffer; meta?: TokenRewriteMeta; toolTruncation?: ToolTruncationMeta } {
         try {
             const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
-            const rewrite = cfg.get<boolean>('rewriteMaxTokens', true);
-            if (!rewrite) {
-                return { body };
-            }
 
             const url = req.url ?? '';
             if (!url.startsWith('/v1/chat/completions') && !url.startsWith('/v1/responses')) {
@@ -177,43 +240,68 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                 return { body };
             }
 
-            const isThinking = (modelName ?? '').toLowerCase().includes('thinking');
-            const cap = isThinking
-                ? cfg.get<number>('maxTokensThinking', 2048)
-                : cfg.get<number>('maxTokensStandard', 4096);
-            if (!Number.isFinite(cap) || cap <= 0) {
-                return { body };
+            const payload: any = JSON.parse(body.toString('utf8'));
+
+            // 1) Tool output truncation (reduces prompt size without impacting user instructions much)
+            const truncateTools = cfg.get<boolean>('truncateToolOutput', true);
+            let toolTruncation: ToolTruncationMeta | undefined;
+            if (truncateTools) {
+                const maxChars = cfg.get<number>('maxToolOutputChars', 12000);
+                const headChars = cfg.get<number>('toolOutputHeadChars', 6000);
+                const tailChars = cfg.get<number>('toolOutputTailChars', 2000);
+                toolTruncation = truncateToolMessagesInPayload(payload, {
+                    maxChars,
+                    headChars,
+                    tailChars,
+                });
             }
 
-            const jsonText = body.toString('utf8');
-            const payload: any = JSON.parse(jsonText);
+            // 2) Token limit clamping
+            const rewriteMaxTokens = cfg.get<boolean>('rewriteMaxTokens', true);
+            let meta: TokenRewriteMeta | undefined;
+            if (rewriteMaxTokens) {
+                const isThinking = (modelName ?? '').toLowerCase().includes('thinking');
+                const cap = isThinking
+                    ? cfg.get<number>('maxTokensThinking', 2048)
+                    : cfg.get<number>('maxTokensStandard', 4096);
+                if (Number.isFinite(cap) && cap > 0) {
+                    meta = {
+                        enabled: true,
+                        cap,
+                        isThinking,
+                    };
 
-            const meta: TokenRewriteMeta = {
-                enabled: true,
-                cap,
-                isThinking,
+                    // OpenAI-compatible endpoints typically use `max_tokens`.
+                    if (typeof payload.max_tokens === 'number') {
+                        meta.originalMaxTokens = payload.max_tokens;
+                        payload.max_tokens = Math.min(payload.max_tokens, cap);
+                        meta.finalMaxTokens = payload.max_tokens;
+                    }
+                    // Some APIs use `max_output_tokens`.
+                    if (typeof payload.max_output_tokens === 'number') {
+                        meta.originalMaxOutputTokens = payload.max_output_tokens;
+                        payload.max_output_tokens = Math.min(payload.max_output_tokens, cap);
+                        meta.finalMaxOutputTokens = payload.max_output_tokens;
+                    }
+                    // Some use `max_completion_tokens`.
+                    if (typeof payload.max_completion_tokens === 'number') {
+                        meta.originalMaxCompletionTokens = payload.max_completion_tokens;
+                        payload.max_completion_tokens = Math.min(payload.max_completion_tokens, cap);
+                        meta.finalMaxCompletionTokens = payload.max_completion_tokens;
+                    }
+                }
+            }
+
+            // Only return truncation meta if any truncation occurred.
+            if (toolTruncation && toolTruncation.truncatedMessages === 0) {
+                toolTruncation = undefined;
+            }
+
+            return {
+                body: Buffer.from(JSON.stringify(payload), 'utf8'),
+                meta,
+                toolTruncation,
             };
-
-            // OpenAI-compatible endpoints typically use `max_tokens`.
-            if (typeof payload.max_tokens === 'number') {
-                meta.originalMaxTokens = payload.max_tokens;
-                payload.max_tokens = Math.min(payload.max_tokens, cap);
-                meta.finalMaxTokens = payload.max_tokens;
-            }
-            // Some APIs use `max_output_tokens`.
-            if (typeof payload.max_output_tokens === 'number') {
-                meta.originalMaxOutputTokens = payload.max_output_tokens;
-                payload.max_output_tokens = Math.min(payload.max_output_tokens, cap);
-                meta.finalMaxOutputTokens = payload.max_output_tokens;
-            }
-            // Some use `max_completion_tokens`.
-            if (typeof payload.max_completion_tokens === 'number') {
-                meta.originalMaxCompletionTokens = payload.max_completion_tokens;
-                payload.max_completion_tokens = Math.min(payload.max_completion_tokens, cap);
-                meta.finalMaxCompletionTokens = payload.max_completion_tokens;
-            }
-
-            return { body: Buffer.from(JSON.stringify(payload), 'utf8'), meta };
         } catch {
             return { body };
         }
@@ -227,6 +315,33 @@ export class ThrottlingProxyServer implements vscode.Disposable {
         streamOpts?: { modelName?: string; isStreaming?: boolean; isThinkingModel?: boolean }
     ): Promise<{ statusCode?: number; errorSnippet?: string }> {
         return await new Promise((resolve, reject) => {
+            let settled = false;
+
+            const settleResolve = (value: { statusCode?: number; errorSnippet?: string }) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                resolve(value);
+            };
+
+            const settleReject = (err: Error) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                reject(err);
+            };
+
+            // Get timeout configuration
+            const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
+            const timeoutMs = streamOpts?.isThinkingModel
+                ? cfg.get<number>('thinkingTimeoutMs', 60000)
+                : cfg.get<number>('requestTimeoutMs', 120000);
+
+            let timeoutId: NodeJS.Timeout | undefined;
+            let didTimeout = false;
+
             const upstreamReq = http.request(
                 {
                     hostname: config.upstreamHost,
@@ -314,12 +429,55 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                     }
 
                     upstreamRes.on('end', () => {
-                        resolve({ statusCode: status, errorSnippet: captured ? captured.trim() : undefined });
+                        if (timeoutId) {
+                            clearTimeout(timeoutId);
+                        }
+                        if (!didTimeout) {
+                            settleResolve({ statusCode: status, errorSnippet: captured ? captured.trim() : undefined });
+                        }
                     });
                 }
             );
 
-            upstreamReq.on('error', reject);
+            upstreamReq.on('error', (err) => {
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                }
+                settleReject(err);
+            });
+
+            // Set timeout for thinking models to prevent quota exhaustion
+            if (timeoutMs > 0) {
+                timeoutId = setTimeout(() => {
+                    didTimeout = true;
+                    this.logInfo(`Request timeout (${timeoutMs}ms) for ${streamOpts?.modelName ?? 'unknown'}`);
+                    try {
+                        upstreamReq.destroy();
+                    } catch {
+                        // ignore
+                    }
+
+                    if (!res.headersSent) {
+                        res.statusCode = 504;
+                        res.setHeader('content-type', 'application/json');
+                        res.end(JSON.stringify({
+                            error: {
+                                message: 'Request timeout',
+                                details: `Request exceeded ${Math.round(timeoutMs / 1000)}s limit to prevent quota exhaustion. Try a simpler prompt or shorter context.`,
+                            },
+                        }));
+                    } else {
+                        // If headers are already sent (streaming), we cannot change status.
+                        // Best effort: terminate the response so Copilot stops waiting.
+                        try {
+                            res.end();
+                        } catch {
+                            // ignore
+                        }
+                    }
+                    settleResolve({ statusCode: 504, errorSnippet: 'Timeout exceeded' });
+                }, timeoutMs);
+            }
 
             // If Copilot cancels the request, stop upstream work too.
             const abortUpstream = () => {
@@ -327,6 +485,9 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                     upstreamReq.destroy();
                 } catch {
                     // ignore
+                }
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
                 }
             };
             req.on('aborted', abortUpstream);
@@ -344,6 +505,7 @@ export class ThrottlingProxyServer implements vscode.Disposable {
         statusCode?: number;
         durationMs: number;
         tokenRewrite?: TokenRewriteMeta;
+        toolTruncation?: ToolTruncationMeta;
         upstreamErrorSnippet?: string;
     }): void {
         const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
@@ -376,6 +538,12 @@ export class ThrottlingProxyServer implements vscode.Disposable {
             }
         }
 
+        const tt = entry.toolTruncation;
+        if (tt && tt.truncatedMessages > 0) {
+            parts.push(`tool_trunc=${tt.truncatedMessages}`);
+            parts.push(`tool_chars=${tt.originalTotalChars}->${tt.finalTotalChars}`);
+        }
+
         this.logInfo(parts.join(' | '));
 
         // Log a small snippet for non-2xx responses; helps pinpoint upstream error type.
@@ -389,6 +557,8 @@ export class ThrottlingProxyServer implements vscode.Disposable {
     }
 
     public dispose(): void {
+        this.configChangeListener?.dispose();
+        this.concurrencyManager.dispose();
         void this.stop();
     }
 
@@ -406,7 +576,82 @@ interface TokenRewriteMeta {
     finalMaxCompletionTokens?: number;
 }
 
+interface ToolTruncationMeta {
+    truncatedMessages: number;
+    originalTotalChars: number;
+    finalTotalChars: number;
+}
+
+function truncateToolMessagesInPayload(
+    payload: any,
+    opts: { maxChars: number; headChars: number; tailChars: number }
+): ToolTruncationMeta {
+    const maxChars = Number.isFinite(opts.maxChars) ? Math.max(0, Math.floor(opts.maxChars)) : 0;
+    let headChars = Number.isFinite(opts.headChars) ? Math.max(0, Math.floor(opts.headChars)) : 0;
+    let tailChars = Number.isFinite(opts.tailChars) ? Math.max(0, Math.floor(opts.tailChars)) : 0;
+
+    // Ensure we can actually fit head+tail within max.
+    if (maxChars > 0 && headChars + tailChars > maxChars) {
+        // Prefer preserving the start of tool output.
+        headChars = Math.min(headChars, maxChars);
+        tailChars = Math.max(0, maxChars - headChars);
+    }
+
+    const meta: ToolTruncationMeta = {
+        truncatedMessages: 0,
+        originalTotalChars: 0,
+        finalTotalChars: 0,
+    };
+
+    const messages = payload?.messages;
+    if (!Array.isArray(messages) || maxChars <= 0) {
+        return meta;
+    }
+
+    for (const msg of messages) {
+        if (!msg || typeof msg !== 'object') {
+            continue;
+        }
+        if (msg.role !== 'tool') {
+            continue;
+        }
+        if (typeof msg.content !== 'string') {
+            continue;
+        }
+
+        const original = msg.content;
+        meta.originalTotalChars += original.length;
+
+        if (original.length <= maxChars) {
+            meta.finalTotalChars += original.length;
+            continue;
+        }
+
+        const head = original.slice(0, headChars);
+        const tail = tailChars > 0 ? original.slice(-tailChars) : '';
+        const omitted = original.length - head.length - tail.length;
+        const marker = `\n\n...[Antigravity proxy truncated tool output: ${omitted} chars omitted]...\n\n`;
+        const truncated = head + marker + tail;
+
+        msg.content = truncated;
+        meta.truncatedMessages += 1;
+        meta.finalTotalChars += truncated.length;
+    }
+
+    return meta;
+}
+
 function sanitizeForLog(text: string): string {
     // Avoid multi-line log spam; never include request bodies/prompts here.
     return text.replace(/\s+/g, ' ').slice(0, 400);
+}
+
+function isSameConfig(a: ThrottlingProxyConfig, b: ThrottlingProxyConfig): boolean {
+    return (
+        a.enabled === b.enabled &&
+        a.host === b.host &&
+        a.port === b.port &&
+        a.upstreamHost === b.upstreamHost &&
+        a.upstreamPort === b.upstreamPort
+    );
 }

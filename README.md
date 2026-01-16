@@ -14,6 +14,7 @@
 - **Auto-Start Support**: Configure the server to start automatically with VS Code
 - **Authentication Launcher**: Launches Antigravity's authentication flow via CLIProxyAPI
 - **Rate Limiting**: Built-in rate limiter to prevent 429 errors with thinking models
+- **Optional Throttling Proxy**: Local proxy that queues BYOK requests and can clamp max output tokens to reduce upstream 429s
 
 ## 🤖 Available Models (10)
 
@@ -118,16 +119,25 @@ Open VS Code Settings (`Ctrl+,`) and search for `antigravityCopilot`:
 
 Rate limiting helps prevent 429 errors when using resource-intensive thinking models.
 
-| Setting                       | Default    | Description                                |
-| ----------------------------- | ---------- | ------------------------------------------ |
-| `rateLimit.enabled`           | `true`     | Enable rate limiting                       |
-| `rateLimit.cooldownMs`        | `15000`    | Cooldown between requests (ms)             |
-| `rateLimit.intensity`         | `standard` | Mode: `standard` (15s) or `thinking` (30s) |
-| `rateLimit.showNotifications` | `true`     | Show notifications when blocked            |
+| Setting                       | Default | Description                     |
+| ----------------------------- | ------- | ------------------------------- |
+| `rateLimit.enabled`           | `true`  | Enable rate limiting            |
+| `rateLimit.cooldownMs`        | `15000` | Cooldown between requests (ms)  |
+| `rateLimit.showNotifications` | `true`  | Show notifications when blocked |
+
+#### Exponential Backoff
+
+When consecutive 429 errors occur, the rate limiter automatically applies **exponential backoff**:
+
+- Each consecutive 429 doubles the effective cooldown (up to 5× the base)
+- The backoff resets after a successful request
+- Check current backoff status via Command Palette → "Antigravity: Rate Limit Status"
+
+This prevents hammering the upstream server when quota is exhausted.
 
 ### Proxy Settings
 
-The optional throttling proxy queues requests to prevent upstream 429 errors with thinking models.
+The optional throttling proxy queues requests to prevent upstream 429 errors with thinking models. Thinking models use reduced token limits (`maxInputTokens: 32000`, `maxOutputTokens: 2048`) to minimize quota burn.
 
 | Setting                       | Default     | Description                                         |
 | ----------------------------- | ----------- | --------------------------------------------------- |
@@ -135,11 +145,22 @@ The optional throttling proxy queues requests to prevent upstream 429 errors wit
 | `proxy.host`                  | `127.0.0.1` | Proxy bind host                                     |
 | `proxy.port`                  | `8320`      | Proxy bind port                                     |
 | `proxy.rewriteMaxTokens`      | `true`      | Clamp output tokens to reduce long generations      |
-| `proxy.maxTokensThinking`     | `2048`      | Max output tokens for Thinking models               |
+| `proxy.maxTokensThinking`     | `1024`      | Max output tokens for Thinking models               |
 | `proxy.maxTokensStandard`     | `4096`      | Max output tokens for standard models               |
 | `proxy.logRequests`           | `true`      | Log request metadata (model, status, duration)      |
 | `proxy.transformThinking`     | `true`      | Transform streaming responses for thinking display  |
 | `proxy.thinkingTransformMode` | `annotate`  | Transform mode: `annotate`, `enhanced`, or `claude` |
+| `proxy.thinkingTimeoutMs`     | `60000`     | Timeout for Thinking requests (abort long runs)     |
+| `proxy.requestTimeoutMs`      | `120000`    | Timeout for standard requests                       |
+| `proxy.truncateToolOutput`    | `true`      | Truncate very large tool outputs (e.g., git diff)   |
+| `proxy.maxToolOutputChars`    | `12000`     | Max chars kept per tool output after truncation     |
+| `proxy.toolOutputHeadChars`   | `6000`      | Chars kept from start of tool output                |
+| `proxy.toolOutputTailChars`   | `2000`      | Chars kept from end of tool output                  |
+| `proxy.maxRequestBodyBytes`   | `10485760`  | Max request body size; returns 413 if exceeded      |
+| `proxy.thinkingConcurrency`   | `1`         | Max concurrent requests for Thinking models         |
+| `proxy.standardConcurrency`   | `3`         | Max concurrent requests for standard models         |
+| `proxy.maxRetries`            | `3`         | Retry attempts for 429 errors (0 to disable)        |
+| `proxy.retryBaseDelayMs`      | `1000`      | Base delay before first retry (exponential backoff) |
 
 #### Thinking Transform Modes
 
@@ -149,6 +170,48 @@ The proxy can transform streaming responses from Thinking models to help clients
 - **`enhanced`**: Adds comprehensive thinking block markers in OpenAI format
 - **`claude`**: Full conversion to Anthropic/Claude streaming format (experimental)
 
+#### Timeouts (prevent long-thinking quota burn)
+
+Long “thinking” runs can consume a lot of quota (even if you didn’t request a huge visible answer). The proxy can abort long-running requests:
+
+- `antigravityCopilot.proxy.thinkingTimeoutMs` (default: 60s)
+- `antigravityCopilot.proxy.requestTimeoutMs` (default: 120s)
+
+#### Tool output truncation (reduce context size)
+
+Copilot Chat tool calls like `git diff` can produce very large outputs that get embedded into subsequent requests. This increases prompt size and can trigger upstream `RESOURCE_EXHAUSTED`.
+
+When enabled, the proxy truncates **only** messages with `role: "tool"` that exceed your configured limits:
+
+- `antigravityCopilot.proxy.truncateToolOutput: true`
+- `antigravityCopilot.proxy.maxToolOutputChars: 12000`
+- `antigravityCopilot.proxy.toolOutputHeadChars: 6000`
+- `antigravityCopilot.proxy.toolOutputTailChars: 2000`
+
+If you want to hard-limit request size regardless, set:
+
+- `antigravityCopilot.proxy.maxRequestBodyBytes` (default: 10MB)
+
+#### Concurrency queue (prevent request bursts)
+
+Copilot Chat can fire multiple requests per prompt (tools, retries, follow-ups). For resource-intensive **Thinking** models, this can trip upstream quota even if you only clicked once.
+
+The proxy uses a **semaphore-based concurrency queue** with separate limits for thinking vs standard models:
+
+- `antigravityCopilot.proxy.thinkingConcurrency: 1` (keep low to avoid exhaustion)
+- `antigravityCopilot.proxy.standardConcurrency: 3`
+
+Excess requests queue until a slot opens. Thinking requests have lower priority than standard requests.
+
+#### Retry with exponential backoff + jitter
+
+When 429 or `RESOURCE_EXHAUSTED` errors occur, the proxy automatically retries with **exponential backoff + jitter**:
+
+- `antigravityCopilot.proxy.maxRetries: 3` (set to 0 to disable)
+- `antigravityCopilot.proxy.retryBaseDelayMs: 1000`
+
+Delay doubles with each retry (1s → 2s → 4s...) plus random jitter to avoid thundering herd.
+
 ### Example settings.json
 
 ```json
@@ -157,8 +220,19 @@ The proxy can transform streaming responses from Thinking models to help clients
   "antigravityCopilot.autoConfigureCopilot": true,
   "antigravityCopilot.showNotifications": true,
   "antigravityCopilot.rateLimit.enabled": true,
-  "antigravityCopilot.rateLimit.intensity": "thinking",
-  "antigravityCopilot.proxy.enabled": true
+  "antigravityCopilot.rateLimit.cooldownMs": 60000,
+  "antigravityCopilot.proxy.enabled": true,
+  "antigravityCopilot.proxy.thinkingConcurrency": 1,
+  "antigravityCopilot.proxy.standardConcurrency": 3,
+  "antigravityCopilot.proxy.maxRetries": 3,
+  "antigravityCopilot.proxy.retryBaseDelayMs": 1000,
+  "antigravityCopilot.proxy.thinkingTimeoutMs": 60000,
+  "antigravityCopilot.proxy.requestTimeoutMs": 120000,
+  "antigravityCopilot.proxy.truncateToolOutput": true,
+  "antigravityCopilot.proxy.maxToolOutputChars": 12000,
+  "antigravityCopilot.proxy.toolOutputHeadChars": 6000,
+  "antigravityCopilot.proxy.toolOutputTailChars": 2000,
+  "antigravityCopilot.proxy.maxRequestBodyBytes": 10485760
 }
 ```
 
@@ -197,11 +271,22 @@ Access commands via Command Palette (`Ctrl+Shift+P`):
 
 ### Rate limit (429) errors
 
+429 `RESOURCE_EXHAUSTED` indicates a **quota or concurrency limit** on the server side — not a syntax error. Common causes:
+
+- Too many concurrent requests (especially with Thinking models)
+- Hitting model-provider GPU/compute quota
+- Very large context causing expensive internal passes
+- Repeated long "thinking" requests consuming extra backend resources
+
+**Quick fixes:**
+
 - Enable rate limiting: `antigravityCopilot.rateLimit.enabled: true`
-- For thinking models, use thinking intensity: `antigravityCopilot.rateLimit.intensity: "thinking"`
 - Increase cooldown if errors persist: `antigravityCopilot.rateLimit.cooldownMs: 30000`
+- Enable tool output truncation to reduce context size
 - Check rate limiter status via Command Palette → "Antigravity: Rate Limit Status"
 - Reset the rate limiter from the sidebar dashboard if needed
+
+The rate limiter applies **exponential backoff** automatically after consecutive 429s.
 
 #### If 429 happens repeatedly with Thinking models
 
@@ -212,8 +297,7 @@ This extension includes an **optional local throttling proxy** that queues reque
 1. Enable the proxy:
    - `antigravityCopilot.proxy.enabled: true`
 2. Re-run **Antigravity: Configure Models**, then reload VS Code.
-3. Use a longer cooldown for thinking models (start with 30–60s):
-   - `antigravityCopilot.rateLimit.intensity: "thinking"`
+3. Use a longer cooldown (start with 30–60s):
    - `antigravityCopilot.rateLimit.cooldownMs: 60000`
 
 If you still see `RESOURCE_EXHAUSTED` immediately, your Antigravity account/model quota may be exhausted; switch to a lighter model or wait for quota reset.
@@ -274,7 +358,7 @@ Open the **Antigravity** output channel to view `[PROXY ...]` log lines.
    vsce package
    ```
 
-   This creates a `.vsix` file (e.g., `antigravity-copilot-1.0.0.vsix`) in the project root.
+   This creates a `.vsix` file (e.g., `antigravity-copilot-1.3.0.vsix`) in the project root.
 
 ### Development
 
@@ -312,7 +396,7 @@ MIT License
 This extension:
 
 1. **Manages CLIProxyAPI**: A local OpenAI-compatible proxy server that launches and manages Antigravity authentication via CLIProxyAPI
-2. **Registers Models via BYOK**: Uses VS Code's official `github.copilot.chat.models` configuration to register custom OpenAI-compatible endpoints
+2. **Registers Models via BYOK**: Uses VS Code/Copilot's BYOK setting `github.copilot.chat.customOAIModels` to register custom OpenAI-compatible endpoints
 3. **Displays Status**: Provides a sidebar UI for server management and status monitoring
 
 No Copilot internals are modified. The extension only uses documented VS Code APIs and settings.

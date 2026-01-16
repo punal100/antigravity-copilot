@@ -371,10 +371,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <span class="info-value" style="color: ${rlStatusColor}">${rlStatusText}</span>
         </div>
         <div class="info-row">
-            <span class="info-label">Mode</span>
-            <span class="info-value">${rlStatus.intensity === 'thinking' ? '🧠 Thinking' : '⚡ Standard'}</span>
-        </div>
-        <div class="info-row">
             <span class="info-label">Cooldown</span>
             <span class="info-value">${rlStatus.cooldownMs / 1000}s</span>
         </div>

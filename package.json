@@ -2,7 +2,7 @@
   "name": "antigravity-copilot",
   "displayName": "Antigravity for Copilot",
   "description": "Use Google Antigravity models (Claude, Gemini) in GitHub Copilot Chat via CLIProxyAPI",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "publisher": "punal100",
   "icon": "media/icon.png",
   "engines": {
@@ -97,6 +97,11 @@
           "default": true,
           "description": "Automatically configure Copilot Chat custom models on startup"
         },
+        "antigravityCopilot.copilot.providerGroupName": {
+          "type": "string",
+          "default": "Antigravity",
+          "description": "Name of the Copilot 'OpenAI Compatible' provider group to create/update (this appears in chatLanguageModels.json)."
+        },
         "antigravityCopilot.showNotifications": {
           "type": "boolean",
           "default": true,
@@ -112,20 +117,7 @@
           "default": 15000,
           "minimum": 1000,
           "maximum": 120000,
-          "description": "Cooldown period in milliseconds between requests (default: 15000ms for standard, 30000ms for thinking)"
-        },
-        "antigravityCopilot.rateLimit.intensity": {
-          "type": "string",
-          "enum": [
-            "standard",
-            "thinking"
-          ],
-          "default": "standard",
-          "description": "Request intensity mode. 'standard' uses shorter cooldowns, 'thinking' uses longer cooldowns to prevent rate limits on heavy models",
-          "enumDescriptions": [
-            "Standard mode with 15 second cooldowns",
-            "Thinking mode with 30 second cooldowns for resource-intensive models"
-          ]
+          "description": "Cooldown period in milliseconds between requests"
         },
         "antigravityCopilot.rateLimit.showNotifications": {
           "type": "boolean",
@@ -154,12 +146,45 @@
           "default": true,
           "description": "When enabled, the proxy will clamp max output tokens in requests to reduce long generations that often trigger upstream 429s."
         },
+        "antigravityCopilot.proxy.truncateToolOutput": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, the proxy will truncate very large tool outputs in the prompt history (e.g., git diff) to reduce context size and avoid upstream quota exhaustion."
+        },
+        "antigravityCopilot.proxy.maxToolOutputChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "maximum": 200000,
+          "description": "Maximum characters to keep for each tool output message after truncation."
+        },
+        "antigravityCopilot.proxy.toolOutputHeadChars": {
+          "type": "number",
+          "default": 6000,
+          "minimum": 0,
+          "maximum": 200000,
+          "description": "Characters to keep from the start of a tool output when truncating."
+        },
+        "antigravityCopilot.proxy.toolOutputTailChars": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 0,
+          "maximum": 200000,
+          "description": "Characters to keep from the end of a tool output when truncating."
+        },
+        "antigravityCopilot.proxy.maxRequestBodyBytes": {
+          "type": "number",
+          "default": 10485760,
+          "minimum": 262144,
+          "maximum": 52428800,
+          "description": "Absolute maximum request body size (bytes) the proxy will accept. Requests larger than this return 413 to prevent memory issues."
+        },
         "antigravityCopilot.proxy.maxTokensThinking": {
           "type": "number",
-          "default": 2048,
+          "default": 1024,
           "minimum": 256,
           "maximum": 8192,
-          "description": "Maximum output tokens to allow for Thinking models when proxy rewriting is enabled"
+          "description": "Maximum output tokens to allow for Thinking models when proxy rewriting is enabled. Lower values reduce quota usage."
         },
         "antigravityCopilot.proxy.maxTokensStandard": {
           "type": "number",
@@ -192,6 +217,48 @@
             "Enhanced: Add comprehensive thinking block markers in OpenAI format",
             "Claude: Full conversion to Anthropic/Claude streaming format (experimental)"
           ]
+        },
+        "antigravityCopilot.proxy.thinkingTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 10000,
+          "maximum": 300000,
+          "description": "Timeout in milliseconds for Thinking model requests. Aborts long-running requests to prevent quota exhaustion. (default: 60s)"
+        },
+        "antigravityCopilot.proxy.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 10000,
+          "maximum": 300000,
+          "description": "Timeout in milliseconds for standard model requests. (default: 120s)"
+        },
+        "antigravityCopilot.proxy.thinkingConcurrency": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Maximum concurrent requests for Thinking models. Keep low (1-2) to avoid upstream quota exhaustion."
+        },
+        "antigravityCopilot.proxy.standardConcurrency": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum concurrent requests for standard (non-Thinking) models."
+        },
+        "antigravityCopilot.proxy.maxRetries": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum retry attempts for 429/RESOURCE_EXHAUSTED errors. Set to 0 to disable retries."
+        },
+        "antigravityCopilot.proxy.retryBaseDelayMs": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 100,
+          "maximum": 10000,
+          "description": "Base delay (ms) before first retry. Subsequent retries use exponential backoff with jitter."
         }
       }
     },
@@ -226,9 +293,9 @@
     "@types/vscode": "^1.95.0",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
-    "esbuild": "^0.20.0",
+    "esbuild": "^0.27.2",
     "eslint": "^8.56.0",
-    "typescript": "^5.3.0",
+    "typescript": "~5.5.4",
     "@vscode/vsce": "^2.22.0"
   },
   "repository": "https://github.com/punal100/antigravity-copilot",

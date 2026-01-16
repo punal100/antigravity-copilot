@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as net from 'net';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execFile } from 'child_process';
 
 export interface ServerConfig {
     enabled: boolean;
@@ -23,6 +23,7 @@ export class AntigravityServer implements vscode.Disposable {
     private process: ChildProcess | undefined;
     private config: ServerConfig;
     private disposed = false;
+    private configChangeDisposable: vscode.Disposable;
 
     private readonly _onDidChangeStatus = new vscode.EventEmitter<void>();
     public readonly onDidChangeStatus = this._onDidChangeStatus.event;
@@ -34,7 +35,7 @@ export class AntigravityServer implements vscode.Disposable {
         this.config = this.getServerConfig();
 
         // Listen for config changes
-        vscode.workspace.onDidChangeConfiguration((e: vscode.ConfigurationChangeEvent) => {
+        this.configChangeDisposable = vscode.workspace.onDidChangeConfiguration((e: vscode.ConfigurationChangeEvent) => {
             if (e.affectsConfiguration('antigravityCopilot')) {
                 const newConfig = this.getServerConfig();
                 const needsRestart = this.process && (
@@ -221,10 +222,14 @@ providers:
         if (!serverReady) {
             // Server didn't become ready in time
             if (this.process) {
-                this.process.kill('SIGTERM');
+                const proc = this.process;
                 this.process = undefined;
+                await this.killProcess(proc);
             }
-            throw new Error(`Server failed to start: port ${this.config.port} is not responding after ${timeout / 1000}s`);
+            const last = lastError ? ` Last error: ${lastError.message}` : '';
+            throw new Error(
+                `Server failed to start: port ${this.config.port} is not responding after ${timeout / 1000}s.${last}`
+            );
         }
 
         this.logInfo(`CLIProxyAPI started successfully (PID: ${this.process.pid}, Port: ${this.config.port})`);
@@ -269,29 +274,10 @@ providers:
         const process = this.process;
         this.process = undefined;
 
-        // Kill the process
-        if (process.pid) {
-            try {
-                process.kill('SIGTERM');
-                
-                // Wait for process to exit gracefully
-                await new Promise<void>((resolve) => {
-                    const timeout = setTimeout(() => {
-                        // Force kill if not exited
-                        if (process.exitCode === null) {
-                            process.kill('SIGKILL');
-                        }
-                        resolve();
-                    }, 5000);
-
-                    process.once('exit', () => {
-                        clearTimeout(timeout);
-                        resolve();
-                    });
-                });
-            } catch (error) {
-                this.logError('Error stopping server', error);
-            }
+        try {
+            await this.killProcess(process);
+        } catch (error) {
+            this.logError('Error stopping server', error);
         }
 
         this.logInfo('CLIProxyAPI stopped');
@@ -369,6 +355,51 @@ providers:
     public async dispose(): Promise<void> {
         this.disposed = true;
         await this.stop();
+        this.configChangeDisposable.dispose();
         this._onDidChangeStatus.dispose();
+    }
+
+    private async killProcess(proc: ChildProcess): Promise<void> {
+        const pid = proc.pid;
+        if (!pid) {
+            return;
+        }
+
+        // Best effort graceful stop first.
+        try {
+            proc.kill();
+        } catch {
+            // ignore
+        }
+
+        await new Promise<void>((resolve) => {
+            if (proc.exitCode !== null) {
+                resolve();
+                return;
+            }
+            const timeout = setTimeout(resolve, 5000);
+            proc.once('exit', () => {
+                clearTimeout(timeout);
+                resolve();
+            });
+        });
+
+        if (proc.exitCode !== null) {
+            return;
+        }
+
+        // Hard kill fallback.
+        if (process.platform === 'win32') {
+            await new Promise<void>((resolve) => {
+                execFile('taskkill', ['/PID', String(pid), '/T', '/F'], () => resolve());
+            });
+            return;
+        }
+
+        try {
+            proc.kill('SIGKILL');
+        } catch {
+            // ignore
+        }
     }
 }

@@ -130,7 +130,7 @@ export class ThinkingStreamTransformer extends Transform {
                 if (this.thinkingActive) {
                     this.thinkingActive = false;
                     // Transition from thinking to content
-                    return this.emitContentAfterThinking(data, regularContent);
+                    return this.emitContentAfterThinking(data);
                 }
             }
 
@@ -169,7 +169,7 @@ export class ThinkingStreamTransformer extends Transform {
         return results.join('');
     }
 
-    private emitContentAfterThinking(originalData: any, content: string): string {
+    private emitContentAfterThinking(originalData: any): string {
         const results: string[] = [];
 
         // Emit a marker that thinking has ended
