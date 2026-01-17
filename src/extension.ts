@@ -83,8 +83,11 @@ export function activate(context: vscode.ExtensionContext) {
     // Rate Limiter Getter
     const getRateLimiter = (): RateLimiter | undefined => rateLimiter;
 
+    // Proxy Server Getter
+    const getProxyServer = () => proxyServer;
+
     // Register Sidebar Provider
-    const sidebarProvider = new SidebarProvider(context.extensionUri, getServer, getRateLimiter);
+    const sidebarProvider = new SidebarProvider(context.extensionUri, getServer, getRateLimiter, getProxyServer);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebarProvider)
     );
@@ -319,9 +322,9 @@ export function activate(context: vscode.ExtensionContext) {
     }
 }
 
-async function startProxyIfEnabled(output: vscode.OutputChannel): Promise<void> {
+async function startProxyIfEnabled(output: vscode.OutputChannel): Promise<number | undefined> {
     if (!proxyServer) {
-        return;
+        return undefined;
     }
 
     const proxyCfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
@@ -330,19 +333,20 @@ async function startProxyIfEnabled(output: vscode.OutputChannel): Promise<void> 
     const enabled = proxyCfg.get<boolean>('enabled', false);
     if (!enabled) {
         await proxyServer.stop();
-        return;
+        return undefined;
     }
 
     const cfg: ThrottlingProxyConfig = {
         enabled: true,
         host: proxyCfg.get<string>('host', '127.0.0.1'),
-        port: proxyCfg.get<number>('port', 8320),
+        port: proxyCfg.get<number>('port', 8420),
         upstreamHost: serverCfg.get<string>('host', '127.0.0.1'),
         upstreamPort: serverCfg.get<number>('port', 8317),
     };
 
-    await proxyServer.start(cfg);
-    output.appendLine(`[DEBUG] Proxy enabled. Base URL: http://${cfg.host}:${cfg.port}/v1`);
+    const boundPort = await proxyServer.start(cfg);
+    output.appendLine(`[DEBUG] Proxy enabled. Base URL: http://${cfg.host}:${boundPort}/v1`);
+    return boundPort;
 }
 
 async function configureAntigravityModels(silent: boolean = false): Promise<void> {
@@ -354,16 +358,30 @@ async function configureAntigravityModels(silent: boolean = false): Promise<void
 
         // Determine which base URL Copilot should use.
         const proxyConfig = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
-        const proxyEnabled = proxyConfig.get<boolean>('enabled', false);
+        const proxyEnabledSetting = proxyConfig.get<boolean>('enabled', false);
         const proxyHost = proxyConfig.get<string>('host', '127.0.0.1');
-        const proxyPort = proxyConfig.get<number>('port', 8320);
-        const baseUrl = proxyEnabled ? `http://${proxyHost}:${proxyPort}/v1` : `http://${host}:${port}/v1`;
-        baseUrlForUi = baseUrl;
 
         // Ensure the proxy is running before pointing Copilot at it.
-        if (proxyEnabled && outputChannel) {
-            await startProxyIfEnabled(outputChannel);
+        // If it fails to start (e.g., port already in use), fall back to direct CLIProxyAPI.
+        let proxyReady = false;
+        let actualProxyPort: number | undefined;
+        if (proxyEnabledSetting && outputChannel) {
+            try {
+                actualProxyPort = await startProxyIfEnabled(outputChannel);
+                proxyReady = actualProxyPort !== undefined;
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                outputChannel.appendLine(`[WARN] Proxy failed to start; falling back to direct server URL. Error: ${message}`);
+                if (!silent) {
+                    void vscode.window.showWarningMessage(
+                        `Throttling proxy failed to start. Falling back to direct server endpoint.\n\nDetails: ${message}`
+                    );
+                }
+            }
         }
+
+        const baseUrl = proxyReady && actualProxyPort ? `http://${proxyHost}:${actualProxyPort}/v1` : `http://${host}:${port}/v1`;
+        baseUrlForUi = baseUrl;
 
         let models: Record<string, CopilotModelConfig>;
 

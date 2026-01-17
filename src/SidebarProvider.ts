@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { AntigravityServer } from './AntigravityServer';
 import { MODEL_LIST } from './models';
 import { RateLimiter } from './RateLimiter';
+import { ThrottlingProxyServer } from './ThrottlingProxyServer';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'antigravity-copilot.sidebarView';
@@ -12,7 +13,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly _extensionUri: vscode.Uri,
         private readonly _getServer: () => AntigravityServer,
-        private readonly _getRateLimiter?: () => RateLimiter | undefined
+        private readonly _getRateLimiter?: () => RateLimiter | undefined,
+        private readonly _getProxyServer?: () => ThrottlingProxyServer | undefined
     ) {
         this._server = _getServer();
     }
@@ -107,6 +109,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private async _getHtml(): Promise<string> {
         const status = this._server.getStatus();
         const isRunning = status.running;
+        
+        // Get proxy server status
+        const proxyStatus = this._getProxyServer?.()?.getStatus();
+        const proxyRunning = proxyStatus?.running ?? false;
+        const proxyPort = proxyStatus?.port;
         
         // Get rate limiter status
         const rlStatus = this._getRateLimiter?.()?.getStatus();
@@ -344,9 +351,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <span class="info-value">${isRunning ? '🟢 Running' : '🔴 Stopped'}</span>
         </div>
         <div class="info-row">
-            <span class="info-label">Port</span>
+            <span class="info-label">CLI Server Port</span>
             <span class="info-value">${status.config.port}</span>
         </div>
+        <div class="info-row">
+            <span class="info-label">Proxy Status</span>
+            <span class="info-value">${proxyRunning ? '🟢 Running' : '⚫ Disabled'}</span>
+        </div>
+        ${proxyRunning && proxyPort ? `
+        <div class="info-row">
+            <span class="info-label">Proxy Port</span>
+            <span class="info-value">${proxyPort}</span>
+        </div>
+        ` : ''}
         <div class="info-row">
             <span class="info-label">Host</span>
             <span class="info-value">${status.config.host}</span>

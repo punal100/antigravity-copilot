@@ -110,7 +110,7 @@ Open VS Code Settings (`Ctrl+,`) and search for `antigravityCopilot`:
 | `server.enabled`        | `false`     | Enable server on startup         |
 | `server.autoStart`      | `false`     | Auto-start server with VS Code   |
 | `server.executablePath` | (auto)      | Path to cli-proxy-api.exe        |
-| `server.port`           | `8317`      | Server port                      |
+| `server.port`           | `8317`      | Starting port (auto-increments if in use) |
 | `server.host`           | `127.0.0.1` | Server host                      |
 | `autoConfigureCopilot`  | `true`      | Auto-configure models on startup |
 | `showNotifications`     | `true`      | Show notifications               |
@@ -143,13 +143,13 @@ The optional throttling proxy queues requests to prevent upstream 429 errors wit
 | ----------------------------- | ----------- | --------------------------------------------------- |
 | `proxy.enabled`               | `true`      | Enable the local throttling proxy                   |
 | `proxy.host`                  | `127.0.0.1` | Proxy bind host                                     |
-| `proxy.port`                  | `8320`      | Proxy bind port                                     |
+| `proxy.port`                  | `8420`      | Starting port for proxy (auto-increments if in use) |
 | `proxy.rewriteMaxTokens`      | `true`      | Clamp output tokens to reduce long generations      |
 | `proxy.maxTokensThinking`     | `1024`      | Max output tokens for Thinking models               |
 | `proxy.maxTokensStandard`     | `4096`      | Max output tokens for standard models               |
 | `proxy.logRequests`           | `true`      | Log request metadata (model, status, duration)      |
 | `proxy.transformThinking`     | `true`      | Transform streaming responses for thinking display  |
-| `proxy.thinkingTransformMode` | `annotate`  | Transform mode: `annotate`, `enhanced`, or `claude` |
+| `proxy.thinkingTransformMode` | `annotate`  | Transform mode: `none`, `annotate`, `enhanced`, or `claude` |
 | `proxy.thinkingTimeoutMs`     | `60000`     | Timeout for Thinking requests (abort long runs)     |
 | `proxy.requestTimeoutMs`      | `120000`    | Timeout for standard requests                       |
 | `proxy.truncateToolOutput`    | `true`      | Truncate very large tool outputs (e.g., git diff)   |
@@ -166,6 +166,7 @@ The optional throttling proxy queues requests to prevent upstream 429 errors wit
 
 The proxy can transform streaming responses from Thinking models to help clients display reasoning content:
 
+- **`none`**: Direct passthrough without any transformation (most compatible)
 - **`annotate`** (default): Adds minimal `_is_thinking` markers to delta objects
 - **`enhanced`**: Adds comprehensive thinking block markers in OpenAI format
 - **`claude`**: Full conversion to Anthropic/Claude streaming format (experimental)

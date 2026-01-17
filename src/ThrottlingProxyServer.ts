@@ -1,5 +1,6 @@
 import * as http from 'http';
 import * as vscode from 'vscode';
+import { PassThrough, Transform, TransformCallback } from 'stream';
 import { RateLimiter } from './RateLimiter';
 import { ModelConcurrencyManager } from './ConcurrencyQueue';
 import { ThinkingStreamTransformer, OpenAIToClaudeStreamTransformer, ReasoningAnnotatorTransformer } from './ThinkingStreamTransformer';
@@ -61,14 +62,14 @@ export class ThrottlingProxyServer implements vscode.Disposable {
         };
     }
 
-    public async start(config: ThrottlingProxyConfig): Promise<void> {
+    public async start(config: ThrottlingProxyConfig): Promise<number> {
         if (!config.enabled) {
-            return;
+            return config.port;
         }
 
         if (this.server) {
             if (this.currentConfig && isSameConfig(this.currentConfig, config)) {
-                return;
+                return this.currentConfig.port;
             }
             await this.stop();
         }
@@ -77,18 +78,54 @@ export class ThrottlingProxyServer implements vscode.Disposable {
             void this.handleRequest(req, res, config);
         });
 
-        await new Promise<void>((resolve, reject) => {
-            this.server!.once('error', reject);
-            this.server!.listen(config.port, config.host, () => {
-                this.server!.off('error', reject);
-                resolve();
-            });
-        });
+        // Try the configured port first, then increment up to 10 times if in use
+        const maxAttempts = 10;
+        let lastError: Error | undefined;
+        let boundPort = config.port;
 
-        this.currentConfig = { ...config };
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const tryPort = config.port + attempt;
+            try {
+                await new Promise<void>((resolve, reject) => {
+                    const onError = (err: NodeJS.ErrnoException) => {
+                        this.server!.off('error', onError);
+                        reject(err);
+                    };
+                    this.server!.once('error', onError);
+                    this.server!.listen(tryPort, config.host, () => {
+                        this.server!.off('error', onError);
+                        resolve();
+                    });
+                });
+                boundPort = tryPort;
+                if (attempt > 0) {
+                    this.logInfo(`Port ${config.port} was in use, bound to port ${boundPort} instead`);
+                }
+                break;
+            } catch (err) {
+                lastError = err instanceof Error ? err : new Error(String(err));
+                const isAddrInUse = (err as NodeJS.ErrnoException).code === 'EADDRINUSE';
+                if (!isAddrInUse || attempt === maxAttempts - 1) {
+                    throw lastError;
+                }
+                // Close and recreate server for next attempt
+                try {
+                    this.server.close();
+                } catch {
+                    // ignore
+                }
+                this.server = http.createServer((req, res) => {
+                    void this.handleRequest(req, res, { ...config, port: tryPort + 1 });
+                });
+            }
+        }
+
+        this.currentConfig = { ...config, port: boundPort };
 
         const status = this.getStatus();
         this.logInfo(`Throttling proxy started on http://${status.host}:${status.port} -> http://${config.upstreamHost}:${config.upstreamPort}`);
+
+        return boundPort;
     }
 
     public async stop(): Promise<void> {
@@ -414,77 +451,149 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                         return;
                     }
 
-                    // Only write headers to client after confirming it's not a retryable error
-                    res.statusCode = status;
-                    for (const [key, value] of Object.entries(upstreamRes.headers)) {
-                        if (value !== undefined) {
-                            res.setHeader(key, value as any);
-                        }
-                    }
-
                     upstreamRes.on('error', reject);
 
-                    const shouldCapture = typeof status === 'number' && status >= 400;
-                    const captureLimit = 4096;
-                    let captured = '';
-
-                    if (shouldCapture) {
-                        upstreamRes.on('data', (chunk: Buffer) => {
-                            if (captured.length >= captureLimit) {
-                                return;
-                            }
-                            const text = chunk.toString('utf8');
-                            captured += text.slice(0, Math.max(0, captureLimit - captured.length));
-                        });
-                    }
-
-                    // For streaming responses from thinking models, optionally transform the response
-                    // to annotate reasoning_content so clients can display it as thinking.
                     const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
                     const transformThinking = cfg.get<boolean>('transformThinking', true);
                     const transformMode = cfg.get<string>('thinkingTransformMode', 'annotate');
 
-                    const shouldTransform = transformThinking &&
-                        streamOpts?.isStreaming &&
-                        streamOpts?.isThinkingModel &&
-                        status === 200;
+                    const wantStreamingPreflight =
+                        status === 200 &&
+                        streamOpts?.isStreaming === true &&
+                        (req.url ?? '').startsWith('/v1/chat/completions');
 
-                    if (shouldTransform) {
+                    // Capture a small snippet of the upstream response for diagnostics.
+                    // Note: for SSE this will be partial and not valid JSON; it's still useful in logs.
+                    const captureLimit = 4096;
+                    let captured = '';
+                    upstreamRes.on('data', (chunk: Buffer) => {
+                        if (captured.length >= captureLimit) {
+                            return;
+                        }
+                        const text = chunk.toString('utf8');
+                        captured += text.slice(0, Math.max(0, captureLimit - captured.length));
+                    });
+
+                    const writeUpstreamHeaders = () => {
+                        res.statusCode = status;
+                        for (const [key, value] of Object.entries(upstreamRes.headers)) {
+                            if (value !== undefined) {
+                                res.setHeader(key, value as any);
+                            }
+                        }
+                    };
+
+                    // If upstream returns an empty/malformed SSE (e.g., immediate [DONE] or no choices),
+                    // Copilot throws "Response contained no choices" on 200 OK. We preflight the first
+                    // SSE event and convert it to a proper non-2xx JSON error instead.
+                    const beginStreamingPipeline = async (initial?: Buffer) => {
+                        const shouldTransform =
+                            transformThinking &&
+                            transformMode !== 'none' &&
+                            streamOpts?.isStreaming &&
+                            streamOpts?.isThinkingModel &&
+                            status === 200;
+
                         const debugLog = cfg.get<boolean>('logRequests', false)
                             ? (msg: string) => this.logInfo(msg)
                             : undefined;
 
-                        let transformer: ThinkingStreamTransformer | OpenAIToClaudeStreamTransformer | ReasoningAnnotatorTransformer;
-
-                        switch (transformMode) {
-                            case 'claude':
-                                // Full conversion to Claude streaming format
-                                transformer = new OpenAIToClaudeStreamTransformer(streamOpts.modelName, debugLog);
-                                break;
-                            case 'enhanced':
-                                // Enhanced OpenAI format with thinking markers
-                                transformer = new ThinkingStreamTransformer(streamOpts.modelName, debugLog);
-                                break;
-                            case 'annotate':
-                            default:
-                                // Minimal annotation of reasoning_content
-                                transformer = new ReasoningAnnotatorTransformer(streamOpts.modelName, debugLog);
-                                break;
+                        // Optionally log passthrough mode.
+                        if (!shouldTransform && streamOpts?.isThinkingModel && cfg.get<boolean>('logRequests', false)) {
+                            this.logInfo(`Passthrough mode for thinking model ${streamOpts.modelName} (transformMode=${transformMode})`);
                         }
 
-                        this.logInfo(`Transforming thinking stream (mode=${transformMode}) for ${streamOpts.modelName}`);
+                        writeUpstreamHeaders();
 
-                        upstreamRes.pipe(transformer).pipe(res);
-                        transformer.on('error', (err) => {
-                            this.logInfo(`Stream transform error: ${err.message}`);
-                            // On transformer error, try to end gracefully
-                            if (!res.writableEnded) {
-                                res.end();
+                        const replay = new PassThrough();
+                        if (initial && initial.length > 0) {
+                            replay.write(initial);
+                        }
+                        upstreamRes.pipe(replay);
+
+                        // Attach a detector to warn if the stream never emits any choices.
+                        const detectorEnabled = cfg.get<boolean>('logRequests', false);
+                        const detector = detectorEnabled
+                            ? new SSEChoicesDetector((warning: string) => this.logInfo(warning))
+                            : undefined;
+
+                        const source = detector ? replay.pipe(detector) : replay;
+
+                        if (shouldTransform) {
+                            let transformer: ThinkingStreamTransformer | OpenAIToClaudeStreamTransformer | ReasoningAnnotatorTransformer;
+                            switch (transformMode) {
+                                case 'claude':
+                                    transformer = new OpenAIToClaudeStreamTransformer(streamOpts.modelName, debugLog);
+                                    break;
+                                case 'enhanced':
+                                    transformer = new ThinkingStreamTransformer(streamOpts.modelName, debugLog);
+                                    break;
+                                case 'annotate':
+                                default:
+                                    transformer = new ReasoningAnnotatorTransformer(streamOpts.modelName, debugLog);
+                                    break;
                             }
+
+                            this.logInfo(`Transforming thinking stream (mode=${transformMode}) for ${streamOpts.modelName}`);
+                            source.pipe(transformer).pipe(res);
+                            transformer.on('error', (err) => {
+                                this.logInfo(`Stream transform error: ${err.message}`);
+                                if (!res.writableEnded) {
+                                    res.end();
+                                }
+                            });
+                        } else {
+                            source.pipe(res);
+                        }
+                    };
+
+                    const handleNonStreaming = () => {
+                        writeUpstreamHeaders();
+                        upstreamRes.pipe(res);
+                    };
+
+                    if (wantStreamingPreflight) {
+                        void (async () => {
+                            const preflight = await preflightFirstSseEvent(upstreamRes, 8192);
+
+                            // If we can confidently say this is an "empty choices" stream, return a proper error.
+                            if (!preflight.ok) {
+                                if (timeoutId) {
+                                    clearTimeout(timeoutId);
+                                }
+                                try {
+                                    upstreamRes.destroy();
+                                } catch {
+                                    // ignore
+                                }
+
+                                if (!res.headersSent) {
+                                    res.statusCode = 502;
+                                    res.setHeader('content-type', 'application/json');
+                                    res.end(
+                                        JSON.stringify({
+                                            error: {
+                                                message: 'Upstream returned an empty or malformed streaming response',
+                                                details: preflight.reason ?? 'No choices detected in initial SSE event',
+                                                code: 'UPSTREAM_EMPTY_CHOICES',
+                                            },
+                                        })
+                                    );
+                                } else {
+                                    res.end();
+                                }
+                                settleResolve({ statusCode: 502, errorSnippet: captured ? captured.trim() : undefined });
+                                return;
+                            }
+
+                            await beginStreamingPipeline(preflight.buffer);
+                        })().catch((err: unknown) => {
+                            const e = err instanceof Error ? err : new Error(String(err));
+                            settleReject(e);
                         });
                     } else {
-                        // Direct passthrough
-                        upstreamRes.pipe(res);
+                        // Non-streaming or non-chat endpoints.
+                        handleNonStreaming();
                     }
 
                     upstreamRes.on('end', () => {
@@ -713,4 +822,159 @@ function isSameConfig(a: ThrottlingProxyConfig, b: ThrottlingProxyConfig): boole
         a.upstreamHost === b.upstreamHost &&
         a.upstreamPort === b.upstreamPort
     );
+}
+
+async function preflightFirstSseEvent(
+    upstreamRes: http.IncomingMessage,
+    maxBytes: number
+): Promise<{ ok: boolean; buffer: Buffer; reason?: string }> {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let done = false;
+
+    const take = (): Promise<Buffer> =>
+        new Promise((resolve, reject) => {
+            const onData = (chunk: Buffer) => {
+                if (done) {
+                    return;
+                }
+                const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                chunks.push(buf);
+                total += buf.length;
+
+                const merged = Buffer.concat(chunks);
+                const text = merged.toString('utf8');
+                const hasDelimiter = text.includes('\n\n');
+                if (hasDelimiter || total >= maxBytes) {
+                    cleanup();
+                    done = true;
+                    // Pause immediately so we don't race and consume too much before we pipe.
+                    try {
+                        upstreamRes.pause();
+                    } catch {
+                        // ignore
+                    }
+                    resolve(merged);
+                }
+            };
+
+            const onEnd = () => {
+                if (done) {
+                    return;
+                }
+                cleanup();
+                done = true;
+                resolve(Buffer.concat(chunks));
+            };
+
+            const onError = (err: Error) => {
+                if (done) {
+                    return;
+                }
+                cleanup();
+                done = true;
+                reject(err);
+            };
+
+            const cleanup = () => {
+                upstreamRes.off('data', onData);
+                upstreamRes.off('end', onEnd);
+                upstreamRes.off('error', onError);
+            };
+
+            upstreamRes.on('data', onData);
+            upstreamRes.once('end', onEnd);
+            upstreamRes.once('error', onError);
+        });
+
+    const buffer = await take();
+
+    // Resume now that we have buffered the initial chunk(s). Piping will also resume.
+    try {
+        upstreamRes.resume();
+    } catch {
+        // ignore
+    }
+
+    const text = buffer.toString('utf8');
+    const firstEvent = text.split('\n\n')[0] ?? '';
+    const match = firstEvent.match(/^data:\s*(.+)$/m);
+    if (!match) {
+        return { ok: true, buffer };
+    }
+
+    const payload = match[1].trim();
+    if (!payload) {
+        return { ok: false, buffer, reason: 'First SSE event had empty data payload' };
+    }
+    if (payload === '[DONE]') {
+        return { ok: false, buffer, reason: 'Upstream returned [DONE] without any choices' };
+    }
+
+    try {
+        const parsed = JSON.parse(payload);
+        const choices = parsed?.choices;
+        if (!Array.isArray(choices) || choices.length === 0) {
+            return { ok: false, buffer, reason: 'Upstream returned JSON with empty/missing choices in first SSE event' };
+        }
+    } catch {
+        // If it's not JSON, let it through (some upstreams may send comments/keepalives first).
+        return { ok: true, buffer };
+    }
+
+    return { ok: true, buffer };
+}
+
+class SSEChoicesDetector extends Transform {
+    private buffer = '';
+    private sawChoices = false;
+
+    constructor(private readonly warn: (msg: string) => void) {
+        super();
+    }
+
+    _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
+        try {
+            const text = chunk.toString('utf8');
+            this.buffer += text;
+
+            // Parse complete SSE events without modifying the stream.
+            let idx: number;
+            while ((idx = this.buffer.indexOf('\n\n')) !== -1) {
+                const event = this.buffer.slice(0, idx);
+                this.buffer = this.buffer.slice(idx + 2);
+                const match = event.match(/^data:\s*(.+)$/m);
+                if (!match) {
+                    continue;
+                }
+                const payload = match[1].trim();
+                if (!payload || payload === '[DONE]') {
+                    continue;
+                }
+                try {
+                    const parsed = JSON.parse(payload);
+                    const choices = parsed?.choices;
+                    if (Array.isArray(choices) && choices.length > 0) {
+                        this.sawChoices = true;
+                    }
+                } catch {
+                    // ignore
+                }
+            }
+
+            this.push(chunk);
+            callback();
+        } catch {
+            // Best-effort: still passthrough.
+            this.push(chunk);
+            callback();
+        }
+    }
+
+    _flush(callback: TransformCallback): void {
+        if (!this.sawChoices) {
+            this.warn('WARNING: Streaming response ended without any choices detected (Copilot may report "Response contained no choices")');
+        }
+        callback();
+    }
 }
