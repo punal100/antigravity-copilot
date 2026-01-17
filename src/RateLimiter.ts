@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
  */
 export class RateLimiter implements vscode.Disposable {
     private static instance: RateLimiter | undefined;
-    
+
     private _isBusy = false;
     private _lastRequestTime = 0;
     private _cooldownTimeoutId: NodeJS.Timeout | undefined;
@@ -16,11 +16,13 @@ export class RateLimiter implements vscode.Disposable {
     private _consecutive429Count = 0;
     /** The actual cooldown being enforced (may be extended after 429s) */
     private _effectiveCooldownMs = 0;
-    
+    /** Track the last model used to apply model-specific cooldowns */
+    private _lastModelWasThinking = false;
+
     private readonly _onDidChangeStatus = new vscode.EventEmitter<RateLimiterStatus>();
     public readonly onDidChangeStatus = this._onDidChangeStatus.event;
 
-    private constructor(private readonly output: vscode.OutputChannel) {}
+    private constructor(private readonly output: vscode.OutputChannel) { }
 
     /**
      * Get or create the singleton instance
@@ -45,7 +47,7 @@ export class RateLimiter implements vscode.Disposable {
         // Use effective cooldown (which may be extended after 429s)
         const activeCooldown = this._effectiveCooldownMs || config.cooldownMs;
         const remainingCooldown = Math.max(0, activeCooldown - timeSinceLastRequest);
-        
+
         return {
             isBusy: this._isBusy,
             isInCooldown: remainingCooldown > 0,
@@ -63,7 +65,7 @@ export class RateLimiter implements vscode.Disposable {
     private getConfig(): RateLimiterConfig {
         const config = vscode.workspace.getConfiguration('antigravityCopilot.rateLimit');
         const cooldownMs = config.get<number>('cooldownMs', 15000);
-        
+
         return {
             enabled: config.get<boolean>('enabled', true),
             cooldownMs,
@@ -77,7 +79,7 @@ export class RateLimiter implements vscode.Disposable {
      */
     public canProceed(modelName?: string, notify: boolean = true): boolean {
         const config = this.getConfig();
-        
+
         if (!config.enabled) {
             return true;
         }
@@ -134,11 +136,12 @@ export class RateLimiter implements vscode.Disposable {
      */
     public startRequest(modelName?: string): void {
         const isThinkingModel = modelName?.toLowerCase().includes('thinking') ?? false;
-        
+
         this._isBusy = true;
         this._pendingRequests++;
         this._lastRequestTime = Date.now();
-        
+        this._lastModelWasThinking = isThinkingModel;
+
         this.logInfo(`Request started${isThinkingModel ? ' (thinking model)' : ''}`);
         this._onDidChangeStatus.fire(this.getStatus());
     }
@@ -149,10 +152,10 @@ export class RateLimiter implements vscode.Disposable {
     public endRequest(error?: Error | { status?: number }): void {
         this._isBusy = false;
         this._pendingRequests = Math.max(0, this._pendingRequests - 1);
-        
+
         const config = this.getConfig();
         const was429 = error && this.isRateLimitError(error);
-        
+
         // Handle rate limit errors with exponential backoff
         if (was429) {
             this._consecutive429Count++;
@@ -168,11 +171,16 @@ export class RateLimiter implements vscode.Disposable {
         }
 
         // Calculate effective cooldown:
-        // - Base cooldown from config
-        // - After 429: double the cooldown for each consecutive 429 (capped at 5 minutes)
+        // - Base cooldown from config (short, since we rely on aggressive retries like Antigravity IDE)
+        // - After 429: only apply backoff if retries exhausted (shouldn't happen often)
         let cooldown = config.cooldownMs;
+
+        // Note: We no longer apply a thinking model multiplier here.
+        // Antigravity IDE handles 429s with aggressive retries, not long preventive cooldowns.
+        // The ConcurrencyQueue will retry 429 errors up to 5 times with short delays.
+
         if (was429) {
-            // Exponential backoff: base * 2^(consecutive-1), capped at 300s
+            // Exponential backoff only when retries are exhausted (rare)
             const backoffMultiplier = Math.pow(2, Math.min(this._consecutive429Count, 5));
             cooldown = Math.min(cooldown * backoffMultiplier, 300000);
         }
@@ -199,10 +207,10 @@ export class RateLimiter implements vscode.Disposable {
         }
         if (error instanceof Error) {
             const message = error.message.toLowerCase();
-            return message.includes('429') || 
-                   message.includes('rate limit') || 
-                   message.includes('too many requests') ||
-                   message.includes('quota exceeded');
+            return message.includes('429') ||
+                message.includes('rate limit') ||
+                message.includes('too many requests') ||
+                message.includes('quota exceeded');
         }
         return false;
     }
@@ -214,9 +222,9 @@ export class RateLimiter implements vscode.Disposable {
         const config = this.getConfig();
         const backoffMultiplier = Math.pow(2, Math.min(this._consecutive429Count, 5));
         const extendedCooldown = Math.min(config.cooldownMs * backoffMultiplier, 300000);
-        
+
         this.logInfo(`Rate limit error detected (429). Consecutive: ${this._consecutive429Count}. Next cooldown: ${extendedCooldown}ms`);
-        
+
         if (config.showNotifications) {
             const waitSeconds = Math.ceil(extendedCooldown / 1000);
             void vscode.window.showWarningMessage(
@@ -268,12 +276,13 @@ export class RateLimiter implements vscode.Disposable {
         this._pendingRequests = 0;
         this._consecutive429Count = 0;
         this._effectiveCooldownMs = 0;
-        
+        this._lastModelWasThinking = false;
+
         if (this._cooldownTimeoutId) {
             clearTimeout(this._cooldownTimeoutId);
             this._cooldownTimeoutId = undefined;
         }
-        
+
         this.logInfo('Rate limiter reset');
         this._onDidChangeStatus.fire(this.getStatus());
     }

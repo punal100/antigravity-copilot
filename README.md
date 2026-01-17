@@ -117,13 +117,13 @@ Open VS Code Settings (`Ctrl+,`) and search for `antigravityCopilot`:
 
 ### Rate Limiting Settings
 
-Rate limiting helps prevent 429 errors when using resource-intensive thinking models.
+Rate limiting provides a safety net for thinking models. The primary 429 mitigation is now **aggressive retries** matching Antigravity IDE's behavior.
 
-| Setting                       | Default | Description                     |
-| ----------------------------- | ------- | ------------------------------- |
-| `rateLimit.enabled`           | `true`  | Enable rate limiting            |
-| `rateLimit.cooldownMs`        | `15000` | Cooldown between requests (ms)  |
-| `rateLimit.showNotifications` | `true`  | Show notifications when blocked |
+| Setting                       | Default | Description                      |
+| ----------------------------- | ------- | -------------------------------- |
+| `rateLimit.enabled`           | `true`  | Enable rate limiting             |
+| `rateLimit.cooldownMs`        | `5000`  | Base cooldown between requests   |
+| `rateLimit.showNotifications` | `true`  | Show notifications when blocked  |
 
 #### Exponential Backoff
 
@@ -203,14 +203,14 @@ The proxy uses a **semaphore-based concurrency queue** with separate limits for 
 
 Excess requests queue until a slot opens. Thinking requests have lower priority than standard requests.
 
-#### Retry with exponential backoff + jitter
+#### Retry with exponential backoff (Antigravity IDE-style)
 
-When 429 or `RESOURCE_EXHAUSTED` errors occur, the proxy automatically retries with **exponential backoff + jitter**:
+When 429 or `RESOURCE_EXHAUSTED` errors occur, the proxy automatically retries with **aggressive short-delay retries** matching Antigravity IDE's approach:
 
-- `antigravityCopilot.proxy.maxRetries: 3` (set to 0 to disable)
-- `antigravityCopilot.proxy.retryBaseDelayMs: 1000`
+- `antigravityCopilot.proxy.maxRetries: 5` (set to 0 to disable)
+- `antigravityCopilot.proxy.retryBaseDelayMs: 100` (almost immediate first retry)
 
-Delay doubles with each retry (1s → 2s → 4s...) plus random jitter to avoid thundering herd.
+Retry delays: ~200ms → ~400ms → ~800ms → ~1.6s → ~3.2s. Most 429 errors resolve within 2-3 retries.
 
 ### Example settings.json
 
@@ -220,12 +220,12 @@ Delay doubles with each retry (1s → 2s → 4s...) plus random jitter to avoid 
   "antigravityCopilot.autoConfigureCopilot": true,
   "antigravityCopilot.showNotifications": true,
   "antigravityCopilot.rateLimit.enabled": true,
-  "antigravityCopilot.rateLimit.cooldownMs": 60000,
+  "antigravityCopilot.rateLimit.cooldownMs": 5000,
   "antigravityCopilot.proxy.enabled": true,
   "antigravityCopilot.proxy.thinkingConcurrency": 1,
   "antigravityCopilot.proxy.standardConcurrency": 3,
-  "antigravityCopilot.proxy.maxRetries": 3,
-  "antigravityCopilot.proxy.retryBaseDelayMs": 1000,
+  "antigravityCopilot.proxy.maxRetries": 5,
+  "antigravityCopilot.proxy.retryBaseDelayMs": 100,
   "antigravityCopilot.proxy.thinkingTimeoutMs": 60000,
   "antigravityCopilot.proxy.requestTimeoutMs": 120000,
   "antigravityCopilot.proxy.truncateToolOutput": true,

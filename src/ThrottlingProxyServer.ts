@@ -4,6 +4,22 @@ import { RateLimiter } from './RateLimiter';
 import { ModelConcurrencyManager } from './ConcurrencyQueue';
 import { ThinkingStreamTransformer, OpenAIToClaudeStreamTransformer, ReasoningAnnotatorTransformer } from './ThinkingStreamTransformer';
 
+/**
+ * Custom error for rate limit (429) responses.
+ * Thrown by proxy when upstream returns 429, enabling retry logic.
+ */
+class RateLimitError extends Error {
+    public readonly status: number;
+    public readonly body: string;
+
+    constructor(message: string, status: number, body: string) {
+        super(message);
+        this.name = 'RateLimitError';
+        this.status = status;
+        this.body = body;
+    }
+}
+
 export interface ThrottlingProxyConfig {
     enabled: boolean;
     host: string;
@@ -23,7 +39,7 @@ export class ThrottlingProxyServer implements vscode.Disposable {
         private readonly rateLimiter: RateLimiter
     ) {
         this.concurrencyManager = new ModelConcurrencyManager(output);
-        
+
         // Listen for config changes to update concurrency limits
         this.configChangeListener = vscode.workspace.onDidChangeConfiguration(e => {
             if (e.affectsConfiguration('antigravityCopilot.proxy')) {
@@ -37,9 +53,9 @@ export class ThrottlingProxyServer implements vscode.Disposable {
         if (!address || typeof address === 'string') {
             return { running: !!this.server };
         }
-        return { 
-            running: !!this.server, 
-            port: address.port, 
+        return {
+            running: !!this.server,
+            port: address.port,
             host: address.address,
             queueStats: this.concurrencyManager.getStats()
         };
@@ -137,14 +153,14 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                     // Serialize + cooldown using the rate limiter.
                     await this.rateLimiter.waitUntilCanProceed(modelName);
                     this.rateLimiter.startRequest(modelName);
-                    
+
                     try {
                         const result = await this.forward(req, res, rewriteResult.body, config, {
                             modelName,
                             isStreaming,
                             isThinkingModel,
                         });
-                        
+
                         this.rateLimiter.endRequest({ status: result.statusCode });
                         return result;
                     } catch (err) {
@@ -177,10 +193,29 @@ export class ThrottlingProxyServer implements vscode.Disposable {
             this.logInfo(`Proxy request failed: ${message}`);
 
             if (!res.headersSent) {
-                res.statusCode = 502;
-                res.setHeader('content-type', 'application/json');
+                // Special handling for rate limit errors (after all retries exhausted)
+                // Return 503 Service Unavailable with a friendly message instead of 429
+                // This prevents Copilot from showing the raw rate limit error
+                if (error instanceof RateLimitError) {
+                    res.statusCode = 503;
+                    res.setHeader('content-type', 'application/json');
+                    res.end(JSON.stringify({
+                        error: {
+                            message: 'Model temporarily unavailable',
+                            details: 'The upstream model quota is exhausted. Please wait a moment and try again. The rate limiter will automatically back off.',
+                            code: 'SERVICE_UNAVAILABLE',
+                            retryable: true,
+                        },
+                    }));
+                } else {
+                    res.statusCode = 502;
+                    res.setHeader('content-type', 'application/json');
+                    res.end(JSON.stringify({ error: { message: 'Upstream request failed', details: message } }));
+                }
+            } else {
+                // Headers already sent, just end the response
+                res.end();
             }
-            res.end(JSON.stringify({ error: { message: 'Upstream request failed', details: message } }));
         }
     }
 
@@ -355,7 +390,32 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                     },
                 },
                 (upstreamRes) => {
-                    res.statusCode = upstreamRes.statusCode ?? 502;
+                    const status = upstreamRes.statusCode ?? 502;
+
+                    // CRITICAL FIX: For 429 errors, throw an error to trigger retry
+                    // Do NOT pipe the response to the client yet, or retry won't work
+                    if (status === 429) {
+                        // Buffer the error response body first
+                        const chunks: Buffer[] = [];
+                        upstreamRes.on('data', (chunk: Buffer) => chunks.push(chunk));
+                        upstreamRes.on('end', () => {
+                            if (timeoutId) {
+                                clearTimeout(timeoutId);
+                            }
+                            const errorBody = Buffer.concat(chunks).toString('utf8');
+                            const err = new RateLimitError(
+                                `Rate limit exceeded (429): ${errorBody.slice(0, 200)}`,
+                                status,
+                                errorBody
+                            );
+                            settleReject(err);
+                        });
+                        upstreamRes.on('error', reject);
+                        return;
+                    }
+
+                    // Only write headers to client after confirming it's not a retryable error
+                    res.statusCode = status;
                     for (const [key, value] of Object.entries(upstreamRes.headers)) {
                         if (value !== undefined) {
                             res.setHeader(key, value as any);
@@ -364,7 +424,6 @@ export class ThrottlingProxyServer implements vscode.Disposable {
 
                     upstreamRes.on('error', reject);
 
-                    const status = upstreamRes.statusCode;
                     const shouldCapture = typeof status === 'number' && status >= 400;
                     const captureLimit = 4096;
                     let captured = '';
@@ -384,19 +443,19 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                     const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
                     const transformThinking = cfg.get<boolean>('transformThinking', true);
                     const transformMode = cfg.get<string>('thinkingTransformMode', 'annotate');
-                    
-                    const shouldTransform = transformThinking && 
-                        streamOpts?.isStreaming && 
-                        streamOpts?.isThinkingModel && 
+
+                    const shouldTransform = transformThinking &&
+                        streamOpts?.isStreaming &&
+                        streamOpts?.isThinkingModel &&
                         status === 200;
 
                     if (shouldTransform) {
-                        const debugLog = cfg.get<boolean>('logRequests', false) 
-                            ? (msg: string) => this.logInfo(msg) 
+                        const debugLog = cfg.get<boolean>('logRequests', false)
+                            ? (msg: string) => this.logInfo(msg)
                             : undefined;
 
                         let transformer: ThinkingStreamTransformer | OpenAIToClaudeStreamTransformer | ReasoningAnnotatorTransformer;
-                        
+
                         switch (transformMode) {
                             case 'claude':
                                 // Full conversion to Claude streaming format
@@ -414,7 +473,7 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                         }
 
                         this.logInfo(`Transforming thinking stream (mode=${transformMode}) for ${streamOpts.modelName}`);
-                        
+
                         upstreamRes.pipe(transformer).pipe(res);
                         transformer.on('error', (err) => {
                             this.logInfo(`Stream transform error: ${err.message}`);

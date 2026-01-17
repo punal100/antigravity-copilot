@@ -20,7 +20,7 @@ export class ConcurrencyQueue {
     constructor(
         private maxConcurrency: number = 2,
         private readonly name: string = 'default'
-    ) {}
+    ) { }
 
     /**
      * Get current queue statistics
@@ -118,6 +118,7 @@ export interface ConcurrencyQueueStats {
 
 /**
  * Retry a function with exponential backoff and jitter for 429 errors.
+ * Matches Antigravity IDE's aggressive retry approach.
  * 
  * @param fn The async function to retry
  * @param options Retry options
@@ -128,9 +129,9 @@ export async function retryWithBackoff<T>(
 ): Promise<T> {
     const {
         maxRetries = 5,
-        baseDelayMs = 500,
-        maxDelayMs = 60000,
-        jitterFactor = 0.5,
+        baseDelayMs = 100,  // Very short first delay (Antigravity IDE retries almost immediately)
+        maxDelayMs = 30000, // Cap at 30 seconds
+        jitterFactor = 0.3, // Less jitter for more predictable retries
         shouldRetry = defaultShouldRetry,
         onRetry,
     } = options;
@@ -147,11 +148,12 @@ export async function retryWithBackoff<T>(
 
             attempt++;
 
-            // Exponential backoff: base * 2^attempt
+            // First retry is very quick, then exponential backoff
+            // Attempt 1: ~100ms, Attempt 2: ~400ms, Attempt 3: ~800ms, etc.
             const exponentialDelay = baseDelayMs * Math.pow(2, attempt);
-            
-            // Add jitter: delay * (1 - jitter/2 + random * jitter)
-            const jitter = (0.5 + Math.random() * jitterFactor);
+
+            // Add small jitter to avoid thundering herd
+            const jitter = (1 - jitterFactor / 2 + Math.random() * jitterFactor);
             const delay = Math.min(Math.floor(exponentialDelay * jitter), maxDelayMs);
 
             if (onRetry) {
@@ -196,11 +198,11 @@ function sleep(ms: number): Promise<void> {
 export interface RetryOptions {
     /** Maximum number of retry attempts (default: 5) */
     maxRetries?: number;
-    /** Base delay in milliseconds before first retry (default: 500) */
+    /** Base delay in milliseconds before first retry (default: 100 - almost immediate like Antigravity IDE) */
     baseDelayMs?: number;
-    /** Maximum delay cap in milliseconds (default: 60000) */
+    /** Maximum delay cap in milliseconds (default: 30000) */
     maxDelayMs?: number;
-    /** Jitter factor 0-1 (default: 0.5) */
+    /** Jitter factor 0-1 (default: 0.3) */
     jitterFactor?: number;
     /** Custom function to determine if error is retryable */
     shouldRetry?: (err: any) => boolean;
@@ -219,12 +221,12 @@ export class ModelConcurrencyManager implements vscode.Disposable {
 
     constructor(output: vscode.OutputChannel) {
         this.output = output;
-        
+
         // Load initial config
         const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
         const thinkingConcurrency = cfg.get<number>('thinkingConcurrency', 1);
         const standardConcurrency = cfg.get<number>('standardConcurrency', 3);
-        
+
         this.thinkingQueue = new ConcurrencyQueue(thinkingConcurrency, 'thinking');
         this.standardQueue = new ConcurrencyQueue(standardConcurrency, 'standard');
     }
@@ -239,10 +241,10 @@ export class ModelConcurrencyManager implements vscode.Disposable {
     ): Promise<T> {
         const isThinking = this.isThinkingModel(modelName);
         const queue = isThinking ? this.thinkingQueue : this.standardQueue;
-        
+
         const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
-        const maxRetries = cfg.get<number>('maxRetries', 3);
-        const retryBaseDelayMs = cfg.get<number>('retryBaseDelayMs', 1000);
+        const maxRetries = cfg.get<number>('maxRetries', 5);  // More retries like Antigravity IDE
+        const retryBaseDelayMs = cfg.get<number>('retryBaseDelayMs', 100);  // Almost immediate first retry
 
         const executeWithRetry = async (): Promise<T> => {
             if (!enableRetry || maxRetries <= 0) {
@@ -260,7 +262,7 @@ export class ModelConcurrencyManager implements vscode.Disposable {
 
         // Higher priority for standard requests (they're usually faster)
         const priority = isThinking ? 0 : 1;
-        
+
         return queue.run(executeWithRetry, priority);
     }
 
@@ -289,10 +291,10 @@ export class ModelConcurrencyManager implements vscode.Disposable {
         const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
         const thinkingConcurrency = cfg.get<number>('thinkingConcurrency', 1);
         const standardConcurrency = cfg.get<number>('standardConcurrency', 3);
-        
+
         this.thinkingQueue.setMaxConcurrency(thinkingConcurrency);
         this.standardQueue.setMaxConcurrency(standardConcurrency);
-        
+
         this.log(`Updated concurrency: thinking=${thinkingConcurrency}, standard=${standardConcurrency}`);
     }
 
