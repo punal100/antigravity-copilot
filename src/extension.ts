@@ -71,9 +71,33 @@ export function activate(context: vscode.ExtensionContext) {
         server = srv;
         context.subscriptions.push(srv);
 
+        let autoConfiguredOnce = false;
+
         // Hook up listeners
         server.onDidChangeStatus(() => {
             updateStatusBar();
+            // Start/stop proxy based on server status
+            const status = server!.getStatus();
+            if (status.running) {
+                // Server started - start proxy pointing to actual port
+                void startProxyIfEnabled(output, status.config.port).catch((error: unknown) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    output.appendLine(`[ERROR] Failed to start throttling proxy: ${message}`);
+                });
+
+                // Auto-configure models only after the server is running.
+                // This avoids noisy BYOK warnings when the server is OFF.
+                const autoConfigureCopilot = vscode.workspace
+                    .getConfiguration('antigravityCopilot')
+                    .get<boolean>('autoConfigureCopilot', true);
+                if (autoConfigureCopilot && !autoConfiguredOnce) {
+                    autoConfiguredOnce = true;
+                    void configureAntigravityModels(true);
+                }
+            } else {
+                // Server stopped - stop proxy too
+                void proxyServer?.stop();
+            }
         });
 
         updateStatusBar();
@@ -130,6 +154,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     const restartServerCommand = vscode.commands.registerCommand('antigravity-copilot.restartServer', async () => {
         const srv = getServer();
+        // Stop proxy first
+        if (proxyServer) {
+            await proxyServer.stop();
+        }
+        // Restart main server (proxy will auto-start via onDidChangeStatus)
         await srv.restart();
     });
 
@@ -286,17 +315,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     if (enabled || autoStart) {
         const srv = getServer();
+        // Proxy will auto-start via onDidChangeStatus when server becomes ready
         void srv.start().catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error);
             output.appendLine(`[ERROR] Failed to start server: ${message}`);
         });
     }
-
-    // Start throttling proxy if enabled
-    void startProxyIfEnabled(output).catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        output.appendLine(`[ERROR] Failed to start throttling proxy: ${message}`);
-    });
 
     // Restart proxy when relevant settings change
     context.subscriptions.push(
@@ -307,22 +331,22 @@ export function activate(context: vscode.ExtensionContext) {
                 e.affectsConfiguration('antigravityCopilot.server.host') ||
                 e.affectsConfiguration('antigravityCopilot.server.port')
             ) {
-                void startProxyIfEnabled(output).catch((error: unknown) => {
-                    const message = error instanceof Error ? error.message : String(error);
-                    output.appendLine(`[ERROR] Failed to restart throttling proxy: ${message}`);
-                });
+                // Only restart proxy if server is running
+                const serverStatus = server?.getStatus();
+                if (serverStatus?.running) {
+                    void startProxyIfEnabled(output, serverStatus.config.port).catch((error: unknown) => {
+                        const message = error instanceof Error ? error.message : String(error);
+                        output.appendLine(`[ERROR] Failed to restart throttling proxy: ${message}`);
+                    });
+                }
             }
         })
     );
 
-    // Auto-configure models if enabled
-    const autoConfigureCopilot = vscode.workspace.getConfiguration('antigravityCopilot').get<boolean>('autoConfigureCopilot', true);
-    if (autoConfigureCopilot) {
-        void configureAntigravityModels(true);
-    }
+    // Auto-configure models is now triggered only after server start (see onDidChangeStatus)
 }
 
-async function startProxyIfEnabled(output: vscode.OutputChannel): Promise<number | undefined> {
+async function startProxyIfEnabled(output: vscode.OutputChannel, actualUpstreamPort?: number): Promise<number | undefined> {
     if (!proxyServer) {
         return undefined;
     }
@@ -336,16 +360,19 @@ async function startProxyIfEnabled(output: vscode.OutputChannel): Promise<number
         return undefined;
     }
 
+    // Use actual upstream port if provided, otherwise fall back to configured port
+    const upstreamPort = actualUpstreamPort ?? serverCfg.get<number>('port', 8317);
+
     const cfg: ThrottlingProxyConfig = {
         enabled: true,
         host: proxyCfg.get<string>('host', '127.0.0.1'),
         port: proxyCfg.get<number>('port', 8420),
         upstreamHost: serverCfg.get<string>('host', '127.0.0.1'),
-        upstreamPort: serverCfg.get<number>('port', 8317),
+        upstreamPort: upstreamPort,
     };
 
     const boundPort = await proxyServer.start(cfg);
-    output.appendLine(`[DEBUG] Proxy enabled. Base URL: http://${cfg.host}:${boundPort}/v1`);
+    output.appendLine(`[DEBUG] Proxy enabled. Base URL: http://${cfg.host}:${boundPort}/v1 -> upstream port ${upstreamPort}`);
     return boundPort;
 }
 
@@ -361,26 +388,30 @@ async function configureAntigravityModels(silent: boolean = false): Promise<void
         const proxyEnabledSetting = proxyConfig.get<boolean>('enabled', false);
         const proxyHost = proxyConfig.get<string>('host', '127.0.0.1');
 
-        // Ensure the proxy is running before pointing Copilot at it.
-        // If it fails to start (e.g., port already in use), fall back to direct CLIProxyAPI.
+        // Check if proxy is already running (started by server's onDidChangeStatus handler).
+        // Do NOT start the proxy here - it should only start after server starts.
         let proxyReady = false;
         let actualProxyPort: number | undefined;
-        if (proxyEnabledSetting && outputChannel) {
-            try {
-                actualProxyPort = await startProxyIfEnabled(outputChannel);
-                proxyReady = actualProxyPort !== undefined;
-            } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                outputChannel.appendLine(`[WARN] Proxy failed to start; falling back to direct server URL. Error: ${message}`);
-                if (!silent) {
-                    void vscode.window.showWarningMessage(
-                        `Throttling proxy failed to start. Falling back to direct server endpoint.\n\nDetails: ${message}`
-                    );
+        let actualServerPort = port; // Default to configured port
+        
+        // Get actual server port and proxy status if server is running
+        if (server) {
+            const serverStatus = server.getStatus();
+            if (serverStatus.running) {
+                actualServerPort = serverStatus.config.port;
+                
+                // Only check proxy status if server is running
+                if (proxyEnabledSetting && proxyServer) {
+                    const proxyStatus = proxyServer.getStatus();
+                    if (proxyStatus.running) {
+                        proxyReady = true;
+                        actualProxyPort = proxyStatus.port;
+                    }
                 }
             }
         }
 
-        const baseUrl = proxyReady && actualProxyPort ? `http://${proxyHost}:${actualProxyPort}/v1` : `http://${host}:${port}/v1`;
+        const baseUrl = proxyReady && actualProxyPort ? `http://${proxyHost}:${actualProxyPort}/v1` : `http://${host}:${actualServerPort}/v1`;
         baseUrlForUi = baseUrl;
 
         let models: Record<string, CopilotModelConfig>;

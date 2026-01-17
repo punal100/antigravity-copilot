@@ -81,17 +81,20 @@ export class AntigravityServer implements vscode.Disposable {
         if (fs.existsSync(configPath)) {
             this.logInfo(`Config file found at: ${configPath}`);
             
-            // If we have a port override, update the config file
-            if (portOverride !== undefined && portOverride !== this.config.port) {
-                try {
-                    let content = fs.readFileSync(configPath, 'utf8');
+            // Always ensure config file has the correct port we intend to use
+            try {
+                let content = fs.readFileSync(configPath, 'utf8');
+                const portMatch = content.match(/^port:\s*(\d+)/m);
+                const currentFilePort = portMatch ? parseInt(portMatch[1], 10) : undefined;
+                
+                if (currentFilePort !== portToUse) {
                     // Update port in existing config
-                    content = content.replace(/^port:\s*\d+/m, `port: ${portOverride}`);
+                    content = content.replace(/^port:\s*\d+/m, `port: ${portToUse}`);
                     fs.writeFileSync(configPath, content, 'utf8');
-                    this.logInfo(`Updated config file port to ${portOverride}`);
-                } catch (error) {
-                    this.logError('Failed to update config file port', error);
+                    this.logInfo(`Updated config file port from ${currentFilePort} to ${portToUse}`);
                 }
+            } catch (error) {
+                this.logError('Failed to update config file port', error);
             }
             return;
         }
