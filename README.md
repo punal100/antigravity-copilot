@@ -105,25 +105,25 @@ Open VS Code Settings (`Ctrl+,`) and search for `antigravityCopilot`:
 
 ### Server Settings
 
-| Setting                 | Default     | Description                      |
-| ----------------------- | ----------- | -------------------------------- |
-| `server.enabled`        | `false`     | Enable server on startup         |
-| `server.autoStart`      | `false`     | Auto-start server with VS Code   |
-| `server.executablePath` | (auto)      | Path to cli-proxy-api.exe        |
+| Setting                 | Default     | Description                               |
+| ----------------------- | ----------- | ----------------------------------------- |
+| `server.enabled`        | `false`     | Enable server on startup                  |
+| `server.autoStart`      | `false`     | Auto-start server with VS Code            |
+| `server.executablePath` | (auto)      | Path to cli-proxy-api.exe                 |
 | `server.port`           | `8317`      | Starting port (auto-increments if in use) |
-| `server.host`           | `127.0.0.1` | Server host                      |
-| `autoConfigureCopilot`  | `true`      | Auto-configure models on startup |
-| `showNotifications`     | `true`      | Show notifications               |
+| `server.host`           | `127.0.0.1` | Server host                               |
+| `autoConfigureCopilot`  | `true`      | Auto-configure models on startup          |
+| `showNotifications`     | `true`      | Show notifications                        |
 
 ### Rate Limiting Settings
 
 Rate limiting provides a safety net for thinking models. The primary 429 mitigation is now **aggressive retries** matching Antigravity IDE's behavior.
 
-| Setting                       | Default | Description                      |
-| ----------------------------- | ------- | -------------------------------- |
-| `rateLimit.enabled`           | `true`  | Enable rate limiting             |
-| `rateLimit.cooldownMs`        | `5000`  | Base cooldown between requests   |
-| `rateLimit.showNotifications` | `true`  | Show notifications when blocked  |
+| Setting                       | Default | Description                     |
+| ----------------------------- | ------- | ------------------------------- |
+| `rateLimit.enabled`           | `true`  | Enable rate limiting            |
+| `rateLimit.cooldownMs`        | `5000`  | Base cooldown between requests  |
+| `rateLimit.showNotifications` | `true`  | Show notifications when blocked |
 
 #### Exponential Backoff
 
@@ -139,28 +139,28 @@ This prevents hammering the upstream server when quota is exhausted.
 
 The optional throttling proxy queues requests to prevent upstream 429 errors with thinking models. Thinking models use reduced token limits (`maxInputTokens: 32000`, `maxOutputTokens: 2048`) to minimize quota burn.
 
-| Setting                       | Default     | Description                                         |
-| ----------------------------- | ----------- | --------------------------------------------------- |
-| `proxy.enabled`               | `true`      | Enable the local throttling proxy                   |
-| `proxy.host`                  | `127.0.0.1` | Proxy bind host                                     |
-| `proxy.port`                  | `8420`      | Starting port for proxy (auto-increments if in use) |
-| `proxy.rewriteMaxTokens`      | `true`      | Clamp output tokens to reduce long generations      |
-| `proxy.maxTokensThinking`     | `1024`      | Max output tokens for Thinking models               |
-| `proxy.maxTokensStandard`     | `4096`      | Max output tokens for standard models               |
-| `proxy.logRequests`           | `true`      | Log request metadata (model, status, duration)      |
-| `proxy.transformThinking`     | `true`      | Transform streaming responses for thinking display  |
-| `proxy.thinkingTransformMode` | `annotate`  | Transform mode: `none`, `annotate`, `enhanced`, or `claude` |
-| `proxy.thinkingTimeoutMs`     | `60000`     | Timeout for Thinking requests (abort long runs)     |
-| `proxy.requestTimeoutMs`      | `120000`    | Timeout for standard requests                       |
-| `proxy.truncateToolOutput`    | `true`      | Truncate very large tool outputs (e.g., git diff)   |
-| `proxy.maxToolOutputChars`    | `12000`     | Max chars kept per tool output after truncation     |
-| `proxy.toolOutputHeadChars`   | `6000`      | Chars kept from start of tool output                |
-| `proxy.toolOutputTailChars`   | `2000`      | Chars kept from end of tool output                  |
-| `proxy.maxRequestBodyBytes`   | `10485760`  | Max request body size; returns 413 if exceeded      |
-| `proxy.thinkingConcurrency`   | `1`         | Max concurrent requests for Thinking models         |
-| `proxy.standardConcurrency`   | `3`         | Max concurrent requests for standard models         |
-| `proxy.maxRetries`            | `3`         | Retry attempts for 429 errors (0 to disable)        |
-| `proxy.retryBaseDelayMs`      | `1000`      | Base delay before first retry (exponential backoff) |
+| Setting                       | Default     | Description                                                 |
+| ----------------------------- | ----------- | ----------------------------------------------------------- |
+| `proxy.enabled`               | `true`      | Enable the local throttling proxy                           |
+| `proxy.host`                  | `127.0.0.1` | Proxy bind host                                             |
+| `proxy.port`                  | `8420`      | Starting port for proxy (auto-increments if in use)         |
+| `proxy.rewriteMaxTokens`      | `true`      | Clamp output tokens to reduce long generations              |
+| `proxy.maxTokensThinking`     | `1024`      | Max output tokens for Thinking models                       |
+| `proxy.maxTokensStandard`     | `4096`      | Max output tokens for standard models                       |
+| `proxy.logRequests`           | `true`      | Log request metadata (model, status, duration)              |
+| `proxy.transformThinking`     | `true`      | Transform streaming responses for thinking display          |
+| `proxy.thinkingTransformMode` | `none`      | Transform mode: `none`, `annotate`, `enhanced`, or `claude` |
+| `proxy.thinkingTimeoutMs`     | `60000`     | Timeout for Thinking requests (abort long runs)             |
+| `proxy.requestTimeoutMs`      | `120000`    | Timeout for standard requests                               |
+| `proxy.truncateToolOutput`    | `true`      | Truncate very large tool outputs (e.g., git diff)           |
+| `proxy.maxToolOutputChars`    | `12000`     | Max chars kept per tool output after truncation             |
+| `proxy.toolOutputHeadChars`   | `6000`      | Chars kept from start of tool output                        |
+| `proxy.toolOutputTailChars`   | `2000`      | Chars kept from end of tool output                          |
+| `proxy.maxRequestBodyBytes`   | `10485760`  | Max request body size; returns 413 if exceeded              |
+| `proxy.thinkingConcurrency`   | `1`         | Max concurrent requests for Thinking models                 |
+| `proxy.standardConcurrency`   | `3`         | Max concurrent requests for standard models                 |
+| `proxy.maxRetries`            | `3`         | Retry attempts for 429 errors (0 to disable)                |
+| `proxy.retryBaseDelayMs`      | `1000`      | Base delay before first retry (exponential backoff)         |
 
 #### Thinking Transform Modes
 
@@ -359,7 +359,7 @@ Open the **Antigravity** output channel to view `[PROXY ...]` log lines.
    vsce package
    ```
 
-   This creates a `.vsix` file (e.g., `antigravity-copilot-1.5.1.vsix`) in the project root.
+   This creates a `.vsix` file (e.g., `antigravity-copilot-1.5.2.vsix`) in the project root.
 
 ### Development
 

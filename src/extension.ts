@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { AntigravityServer } from './AntigravityServer';
 import { SidebarProvider } from './SidebarProvider';
 import { ANTIGRAVITY_MODELS, CopilotModelConfig, fetchModelsFromServer } from './models';
@@ -80,10 +82,28 @@ export function activate(context: vscode.ExtensionContext) {
             const status = server!.getStatus();
             if (status.running) {
                 // Server started - start proxy pointing to actual port
-                void startProxyIfEnabled(output, status.config.port).catch((error: unknown) => {
-                    const message = error instanceof Error ? error.message : String(error);
-                    output.appendLine(`[ERROR] Failed to start throttling proxy: ${message}`);
-                });
+                void (async () => {
+                    try {
+                        const proxyPort = await startProxyIfEnabled(output, status.config.port);
+                        
+                        // Determine the active endpoint URL
+                        const proxyConfig = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
+                        const proxyEnabled = proxyConfig.get<boolean>('enabled', false);
+                        const proxyHost = proxyConfig.get<string>('host', '127.0.0.1');
+                        const serverHost = status.config.host;
+                        
+                        const activeUrl = proxyEnabled && proxyPort
+                            ? `http://${proxyHost}:${proxyPort}/v1`
+                            : `http://${serverHost}:${status.config.port}/v1`;
+                        
+                        // Always update stored endpoints to match current config
+                        await updateStoredEndpoints(activeUrl);
+                        output.appendLine(`[INFO] Updated stored model endpoints to: ${activeUrl}`);
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        output.appendLine(`[ERROR] Failed during server startup: ${message}`);
+                    }
+                })();
 
                 // Auto-configure models only after the server is running.
                 // This avoids noisy BYOK warnings when the server is OFF.
@@ -575,6 +595,186 @@ function rewriteModelUrls(models: Record<string, CopilotModelConfig>, baseUrl: s
     return updated;
 }
 
+/**
+ * Get the path to VS Code's chatLanguageModels.json file.
+ * This file stores BYOK model configurations.
+ */
+function getChatLanguageModelsPath(): string | undefined {
+    // VS Code stores user data in different locations based on the product
+    const appDataPath = process.env.APPDATA || process.env.HOME;
+    if (!appDataPath) {
+        return undefined;
+    }
+
+    // Detect if we're in VS Code Insiders or regular VS Code
+    const isInsiders = vscode.env.appName.toLowerCase().includes('insider');
+    const vscodeFolderName = isInsiders ? 'Code - Insiders' : 'Code';
+
+    // On Windows: %APPDATA%\Code\User\chatLanguageModels.json
+    // On macOS: ~/Library/Application Support/Code/User/chatLanguageModels.json
+    // On Linux: ~/.config/Code/User/chatLanguageModels.json
+    let userDataPath: string;
+    if (process.platform === 'win32') {
+        userDataPath = path.join(appDataPath, vscodeFolderName, 'User');
+    } else if (process.platform === 'darwin') {
+        userDataPath = path.join(appDataPath, 'Library', 'Application Support', vscodeFolderName, 'User');
+    } else {
+        // Linux
+        const configPath = process.env.XDG_CONFIG_HOME || path.join(appDataPath, '.config');
+        userDataPath = path.join(configPath, vscodeFolderName, 'User');
+    }
+
+    return path.join(userDataPath, 'chatLanguageModels.json');
+}
+
+/**
+ * Update all Antigravity model endpoints in the stored chatLanguageModels.json.
+ * This ensures models always point to the current proxy/server port.
+ */
+async function updateStoredEndpoints(newUrl: string): Promise<boolean> {
+    const filePath = getChatLanguageModelsPath();
+    if (!filePath) {
+        outputChannel?.appendLine('[WARN] Could not determine chatLanguageModels.json path');
+        return false;
+    }
+
+    try {
+        if (!fs.existsSync(filePath)) {
+            outputChannel?.appendLine('[DEBUG] chatLanguageModels.json does not exist yet');
+            return false;
+        }
+
+        const content = fs.readFileSync(filePath, 'utf8');
+        const data = JSON.parse(content) as {
+            value?: Array<{
+                name?: string;
+                vendor?: string;
+                models?: Array<{ url?: string; [key: string]: unknown }>;
+            }>;
+        };
+
+        if (!data.value || !Array.isArray(data.value)) {
+            return false;
+        }
+
+        const lmCfg = vscode.workspace.getConfiguration('antigravityCopilot.copilot');
+        const providerGroupName = lmCfg.get<string>('providerGroupName', 'Antigravity');
+
+        let updated = false;
+        for (const group of data.value) {
+            // Only update our Antigravity group
+            if (group.name === providerGroupName && group.vendor === 'customoai' && Array.isArray(group.models)) {
+                for (const model of group.models) {
+                    if (model.url && model.url !== newUrl) {
+                        model.url = newUrl;
+                        updated = true;
+                    }
+                }
+            }
+        }
+
+        if (updated) {
+            fs.writeFileSync(filePath, JSON.stringify(data, null, 4), 'utf8');
+            outputChannel?.appendLine(`[INFO] Updated ${providerGroupName} model endpoints in chatLanguageModels.json`);
+        }
+
+        return updated;
+    } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        outputChannel?.appendLine(`[WARN] Failed to update chatLanguageModels.json: ${msg}`);
+        return false;
+    }
+}
+
+/**
+ * Update or create the Antigravity provider group in chatLanguageModels.json directly.
+ * This bypasses the lm.migrateLanguageModelsProviderGroup command which fails on "already exists".
+ */
+async function updateOrCreateProviderGroup(
+    models: Record<string, CopilotModelConfig>,
+    providerGroupName: string
+): Promise<boolean> {
+    const filePath = getChatLanguageModelsPath();
+    if (!filePath) {
+        outputChannel?.appendLine('[WARN] Could not determine chatLanguageModels.json path');
+        return false;
+    }
+
+    try {
+        let data: {
+            value: Array<{
+                name: string;
+                vendor: string;
+                models: Array<{
+                    id: string;
+                    name: string;
+                    url: string;
+                    toolCalling?: boolean;
+                    vision?: boolean;
+                    thinking?: boolean;
+                    maxInputTokens?: number;
+                    maxOutputTokens?: number;
+                }>;
+            }>;
+        };
+
+        if (fs.existsSync(filePath)) {
+            const content = fs.readFileSync(filePath, 'utf8');
+            data = JSON.parse(content);
+        } else {
+            data = { value: [] };
+        }
+
+        if (!data.value || !Array.isArray(data.value)) {
+            data.value = [];
+        }
+
+        // Convert models to the format used in chatLanguageModels.json
+        const modelConfigs = Object.entries(models).map(([id, cfg]) => ({
+            id,
+            name: cfg.name,
+            url: cfg.url,
+            toolCalling: cfg.toolCalling,
+            vision: cfg.vision,
+            thinking: cfg.thinking,
+            maxInputTokens: cfg.maxInputTokens,
+            maxOutputTokens: cfg.maxOutputTokens,
+        }));
+
+        // Find existing group or create new one
+        const existingGroupIndex = data.value.findIndex(
+            g => g.name === providerGroupName && g.vendor === 'customoai'
+        );
+
+        if (existingGroupIndex >= 0) {
+            // Update existing group
+            data.value[existingGroupIndex].models = modelConfigs;
+            outputChannel?.appendLine(`[INFO] Updated existing provider group '${providerGroupName}' with ${modelConfigs.length} models`);
+        } else {
+            // Create new group
+            data.value.push({
+                name: providerGroupName,
+                vendor: 'customoai',
+                models: modelConfigs,
+            });
+            outputChannel?.appendLine(`[INFO] Created new provider group '${providerGroupName}' with ${modelConfigs.length} models`);
+        }
+
+        // Ensure directory exists
+        const dir = path.dirname(filePath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 4), 'utf8');
+        return true;
+    } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        outputChannel?.appendLine(`[ERROR] Failed to update chatLanguageModels.json: ${msg}`);
+        return false;
+    }
+}
+
 async function tryConfigureViaLanguageModels(
     models: Record<string, CopilotModelConfig>,
     options: { silent: boolean; providerGroupName: string }
@@ -611,19 +811,21 @@ async function tryConfigureViaLanguageModels(
         const msg = err instanceof Error ? err.message : String(err);
         outputChannel?.appendLine(`[WARN] Failed to configure via '${commandId}': ${msg}`);
 
-        // If the command is missing or feature isn’t enabled, fall back to legacy path.
-        // (We don't show UI here; caller handles messaging.)
-        if (/command .* not found|unknown command|not a registered command/i.test(msg)) {
-            return false;
+        // If the command is missing, feature isn't enabled, or group already exists, try direct file update
+        if (/command .* not found|unknown command|not a registered command|already exists|not registered|vendor.*not.*registered/i.test(msg)) {
+            outputChannel?.appendLine('[INFO] API not available or group exists, trying direct file update...');
+            return await updateOrCreateProviderGroup(models, groupName);
         }
 
-        // In some environments BYOK is disabled; treat that as not-configured.
+        // In some environments BYOK is disabled; try direct update
         if (/byok|bring your own|not available|not enabled|forbidden|unauthorized/i.test(msg)) {
-            return false;
+            outputChannel?.appendLine('[INFO] BYOK not available via API, trying direct file update...');
+            return await updateOrCreateProviderGroup(models, groupName);
         }
 
-        // Other errors might be transient; still allow legacy fallback.
-        return false;
+        // Other errors - still try direct update as fallback
+        outputChannel?.appendLine('[INFO] Falling back to direct file update...');
+        return await updateOrCreateProviderGroup(models, groupName);
     }
 }
 

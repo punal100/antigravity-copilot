@@ -170,31 +170,31 @@ export class RateLimiter implements vscode.Disposable {
             clearTimeout(this._cooldownTimeoutId);
         }
 
-        // Calculate effective cooldown:
-        // - Base cooldown from config (short, since we rely on aggressive retries like Antigravity IDE)
-        // - After 429: only apply backoff if retries exhausted (shouldn't happen often)
-        let cooldown = config.cooldownMs;
-
-        // Note: We no longer apply a thinking model multiplier here.
-        // Antigravity IDE handles 429s with aggressive retries, not long preventive cooldowns.
-        // The ConcurrencyQueue will retry 429 errors up to 5 times with short delays.
-
+        // Only apply cooldown after 429 errors, not after successful requests.
+        // This allows Copilot to send follow-up requests (tool calls, streaming) without delay.
+        // The ConcurrencyQueue handles burst protection via semaphore limits.
         if (was429) {
-            // Exponential backoff only when retries are exhausted (rare)
+            // Exponential backoff when rate limited
             const backoffMultiplier = Math.pow(2, Math.min(this._consecutive429Count, 5));
-            cooldown = Math.min(cooldown * backoffMultiplier, 300000);
+            const cooldown = Math.min(config.cooldownMs * backoffMultiplier, 300000);
+            this._effectiveCooldownMs = cooldown;
+            this._lastRequestTime = Date.now();
+
+            // Set up cooldown
+            this._cooldownTimeoutId = setTimeout(() => {
+                this._effectiveCooldownMs = 0;
+                this.logInfo('Cooldown period ended');
+                this._onDidChangeStatus.fire(this.getStatus());
+            }, cooldown);
+
+            this.logInfo(`Request ended with 429. Cooldown: ${cooldown}ms (backoff x${backoffMultiplier})`);
+        } else {
+            // Successful request - no cooldown, just update timestamp
+            this._effectiveCooldownMs = 0;
+            this._lastRequestTime = Date.now();
+            this.logInfo('Request ended successfully');
         }
-        this._effectiveCooldownMs = cooldown;
-        this._lastRequestTime = Date.now();
 
-        // Set up cooldown
-        this._cooldownTimeoutId = setTimeout(() => {
-            this._effectiveCooldownMs = 0; // Reset to base cooldown
-            this.logInfo('Cooldown period ended');
-            this._onDidChangeStatus.fire(this.getStatus());
-        }, cooldown);
-
-        this.logInfo(`Request ended. Cooldown: ${cooldown}ms${was429 ? ` (backoff x${Math.pow(2, Math.min(this._consecutive429Count, 5))})` : ''}`);
         this._onDidChangeStatus.fire(this.getStatus());
     }
 

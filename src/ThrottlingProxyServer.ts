@@ -171,6 +171,11 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                 return;
             }
 
+            const urlPath = req.url ?? '';
+            const isChatCompletionEndpoint = urlPath.startsWith('/v1/chat/completions') ||
+                urlPath.startsWith('/v1/completions') ||
+                urlPath.startsWith('/v1/responses');
+
             const modelName = this.tryExtractModelName(req, body);
             const isStreaming = this.isStreamingRequest(body);
             const isThinkingModel = (modelName ?? '').toLowerCase().includes('thinking');
@@ -181,36 +186,49 @@ export class ThrottlingProxyServer implements vscode.Disposable {
 
             const startedAt = Date.now();
 
-            // Use concurrency queue with retry for the forward request.
-            // The queue ensures thinking models have limited concurrency (default: 1)
-            // and retries with exponential backoff + jitter on 429 errors.
-            const forwardResult = await this.concurrencyManager.runRequest(
-                modelName,
-                async () => {
-                    // Serialize + cooldown using the rate limiter.
-                    await this.rateLimiter.waitUntilCanProceed(modelName);
-                    this.rateLimiter.startRequest(modelName);
+            // Only apply rate limiting and concurrency queue to chat completion endpoints.
+            // Other endpoints (GET /v1/models, health checks, etc.) pass through directly.
+            let forwardResult: { statusCode: number; errorSnippet?: string };
 
-                    try {
-                        const result = await this.forward(req, res, rewriteResult.body, config, {
-                            modelName,
-                            isStreaming,
-                            isThinkingModel,
-                        });
+            if (isChatCompletionEndpoint) {
+                // Use concurrency queue with retry for the forward request.
+                // The queue ensures thinking models have limited concurrency (default: 1)
+                // and retries with exponential backoff + jitter on 429 errors.
+                forwardResult = await this.concurrencyManager.runRequest(
+                    modelName,
+                    async () => {
+                        // Serialize + cooldown using the rate limiter.
+                        await this.rateLimiter.waitUntilCanProceed(modelName);
+                        this.rateLimiter.startRequest(modelName);
 
-                        this.rateLimiter.endRequest({ status: result.statusCode });
-                        return result;
-                    } catch (err) {
-                        this.rateLimiter.endRequest(err instanceof Error ? err : new Error(String(err)));
-                        throw err;
-                    }
-                },
-                true // enableRetry
-            );
+                        try {
+                            const result = await this.forward(req, res, rewriteResult.body, config, {
+                                modelName,
+                                isStreaming,
+                                isThinkingModel,
+                            });
+
+                            this.rateLimiter.endRequest({ status: result.statusCode });
+                            return result;
+                        } catch (err) {
+                            this.rateLimiter.endRequest(err instanceof Error ? err : new Error(String(err)));
+                            throw err;
+                        }
+                    },
+                    true // enableRetry
+                );
+            } else {
+                // Non-chat endpoints: forward directly without rate limiting
+                forwardResult = await this.forward(req, res, rewriteResult.body, config, {
+                    modelName,
+                    isStreaming,
+                    isThinkingModel,
+                });
+            }
 
             this.logRequestMeta({
                 method: req.method ?? 'GET',
-                path: req.url ?? '',
+                path: urlPath,
                 model: modelName,
                 statusCode: forwardResult.statusCode,
                 durationMs: Date.now() - startedAt,
@@ -455,7 +473,7 @@ export class ThrottlingProxyServer implements vscode.Disposable {
 
                     const cfg = vscode.workspace.getConfiguration('antigravityCopilot.proxy');
                     const transformThinking = cfg.get<boolean>('transformThinking', true);
-                    const transformMode = cfg.get<string>('thinkingTransformMode', 'annotate');
+                    const transformMode = cfg.get<string>('thinkingTransformMode', 'none');
 
                     const wantStreamingPreflight =
                         status === 200 &&

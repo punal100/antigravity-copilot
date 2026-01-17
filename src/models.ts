@@ -21,10 +21,13 @@ export interface ModelInfo {
 }
 
 // Fallback static models (used when server is not available)
+// URL is a placeholder that gets rewritten by rewriteModelUrls() in extension.ts
+const PLACEHOLDER_URL = "http://127.0.0.1:8317/v1";
+
 export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     "gemini-claude-sonnet-4-5": {
         "name": "Antigravity: Claude Sonnet 4.5",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-claude-sonnet-4-5",
         "toolCalling": true,
         "vision": false,
@@ -35,7 +38,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gemini-claude-sonnet-4-5-thinking": {
         "name": "Antigravity: Claude Sonnet 4.5 (Thinking)",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-claude-sonnet-4-5-thinking",
         "toolCalling": true,
         "vision": false,
@@ -46,7 +49,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gemini-claude-opus-4-5-thinking": {
         "name": "Antigravity: Claude Opus 4.5 (Thinking)",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-claude-opus-4-5-thinking",
         "toolCalling": true,
         "vision": false,
@@ -57,7 +60,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gemini-2.5-flash": {
         "name": "Antigravity: Gemini 2.5 Flash",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-2.5-flash",
         "toolCalling": true,
         "vision": false,
@@ -68,7 +71,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gemini-2.5-flash-lite": {
         "name": "Antigravity: Gemini 2.5 Flash Lite",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-2.5-flash-lite",
         "toolCalling": true,
         "vision": false,
@@ -79,7 +82,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gemini-3-pro-preview": {
         "name": "Antigravity: Gemini 3 Pro (Preview)",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-3-pro-preview",
         "toolCalling": true,
         "vision": false,
@@ -90,7 +93,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gemini-3-flash-preview": {
         "name": "Antigravity: Gemini 3 Flash (Preview)",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-3-flash-preview",
         "toolCalling": true,
         "vision": false,
@@ -101,7 +104,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gemini-3-pro-image-preview": {
         "name": "Antigravity: Gemini 3 Pro Image (Preview)",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-3-pro-image-preview",
         "toolCalling": true,
         "vision": true,
@@ -112,7 +115,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gemini-2.5-computer-use-preview-10-2025": {
         "name": "Antigravity: Gemini 2.5 Computer Use (Preview)",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gemini-2.5-computer-use-preview-10-2025",
         "toolCalling": true,
         "vision": true,
@@ -123,7 +126,7 @@ export const ANTIGRAVITY_MODELS: Record<string, CopilotModelConfig> = {
     },
     "gpt-oss-120b-medium": {
         "name": "Antigravity: gpt-oss-120b-medium",
-        "url": "http://127.0.0.1:8317/v1",
+        "url": PLACEHOLDER_URL,
         "model": "gpt-oss-120b-medium",
         "toolCalling": false,
         "vision": false,
