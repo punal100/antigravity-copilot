@@ -2,7 +2,7 @@
   "name": "antigravity-copilot",
   "displayName": "Antigravity for Copilot",
   "description": "Use Google Antigravity models (Claude, Gemini) in GitHub Copilot Chat via CLIProxyAPI",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "publisher": "punal100",
   "icon": "media/icon.png",
   "engines": {
@@ -261,6 +261,11 @@
           "minimum": 50,
           "maximum": 10000,
           "description": "Base delay (ms) before first retry. Almost immediate like Antigravity IDE, then exponential backoff."
+        },
+        "antigravityCopilot.proxy.ssePreflightEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable SSE preflight check to detect empty streaming responses. Disable if experiencing issues with certain models."
         }
       }
     },

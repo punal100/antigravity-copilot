@@ -18,6 +18,8 @@ export class RateLimiter implements vscode.Disposable {
     private _effectiveCooldownMs = 0;
     /** Track the last model used to apply model-specific cooldowns */
     private _lastModelWasThinking = false;
+    /** Abort controller to cancel pending waitUntilCanProceed calls */
+    private _abortController: AbortController | undefined;
 
     private readonly _onDidChangeStatus = new vscode.EventEmitter<RateLimiterStatus>();
     public readonly onDidChangeStatus = this._onDidChangeStatus.event;
@@ -115,8 +117,19 @@ export class RateLimiter implements vscode.Disposable {
      * so it does not spam UI notifications.
      */
     public async waitUntilCanProceed(modelName?: string, timeoutMs: number = 120000): Promise<void> {
+        // Create abort controller if not exists
+        if (!this._abortController) {
+            this._abortController = new AbortController();
+        }
+        const signal = this._abortController.signal;
+
         const start = Date.now();
         while (!this.canProceed(modelName, false)) {
+            // Check if aborted
+            if (signal.aborted) {
+                throw new Error('Request cancelled: rate limiter aborted');
+            }
+
             const status = this.getStatus();
             const remaining = Math.max(0, timeoutMs - (Date.now() - start));
             if (remaining <= 0) {
@@ -127,8 +140,34 @@ export class RateLimiter implements vscode.Disposable {
             const sleepMs = status.isInCooldown
                 ? Math.min(status.remainingCooldownMs, 1000)
                 : 250;
-            await new Promise(resolve => setTimeout(resolve, Math.min(sleepMs, remaining)));
+            
+            // Use AbortSignal-aware sleep
+            await this.abortableSleep(Math.min(sleepMs, remaining), signal);
         }
+    }
+
+    /**
+     * Sleep that can be interrupted by an AbortSignal
+     */
+    private abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+        return new Promise((resolve, reject) => {
+            if (signal.aborted) {
+                reject(new Error('Request cancelled: rate limiter aborted'));
+                return;
+            }
+
+            const timeoutId = setTimeout(() => {
+                signal.removeEventListener('abort', onAbort);
+                resolve();
+            }, ms);
+
+            const onAbort = () => {
+                clearTimeout(timeoutId);
+                reject(new Error('Request cancelled: rate limiter aborted'));
+            };
+
+            signal.addEventListener('abort', onAbort, { once: true });
+        });
     }
 
     /**
@@ -287,11 +326,26 @@ export class RateLimiter implements vscode.Disposable {
         this._onDidChangeStatus.fire(this.getStatus());
     }
 
+    /**
+     * Abort all pending waitUntilCanProceed calls.
+     * This should be called when the server is stopped to cancel waiting requests.
+     */
+    public abortPendingRequests(): void {
+        if (this._abortController) {
+            this._abortController.abort();
+            this._abortController = undefined;
+            this.logInfo('Aborted all pending rate-limited requests');
+        }
+    }
+
     private logInfo(message: string): void {
         this.output.appendLine(`[${new Date().toISOString()}] RATE-LIMIT ${message}`);
     }
 
     public dispose(): void {
+        // Abort any pending requests
+        this.abortPendingRequests();
+        
         if (this._cooldownTimeoutId) {
             clearTimeout(this._cooldownTimeoutId);
         }

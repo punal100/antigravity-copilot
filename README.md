@@ -359,7 +359,7 @@ Open the **Antigravity** output channel to view `[PROXY ...]` log lines.
    vsce package
    ```
 
-   This creates a `.vsix` file (e.g., `antigravity-copilot-1.5.2.vsix`) in the project root.
+   This creates a `.vsix` file (e.g., `antigravity-copilot-1.5.3.vsix`) in the project root.
 
 ### Development
 

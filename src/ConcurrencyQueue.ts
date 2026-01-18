@@ -302,6 +302,16 @@ export class ModelConcurrencyManager implements vscode.Disposable {
         this.output.appendLine(`[${new Date().toISOString()}] QUEUE ${message}`);
     }
 
+    /**
+     * Clear all queued requests without disposing the manager.
+     * Use this when stopping the server to release waiting requests.
+     */
+    public clearQueues(): void {
+        this.thinkingQueue.clearQueue();
+        this.standardQueue.clearQueue();
+        this.log('Cleared all queued requests');
+    }
+
     public dispose(): void {
         this.thinkingQueue.clearQueue();
         this.standardQueue.clearQueue();

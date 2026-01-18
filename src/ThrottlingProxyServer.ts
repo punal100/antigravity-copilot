@@ -129,6 +129,14 @@ export class ThrottlingProxyServer implements vscode.Disposable {
     }
 
     public async stop(): Promise<void> {
+        // First, abort any pending rate-limited requests to prevent them from continuing
+        // to poll after the server is stopped
+        this.rateLimiter.abortPendingRequests();
+        this.rateLimiter.reset();
+
+        // Clear the concurrency queues to release any waiting requests
+        this.concurrencyManager.clearQueues();
+
         if (!this.server) {
             return;
         }
@@ -475,7 +483,9 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                     const transformThinking = cfg.get<boolean>('transformThinking', true);
                     const transformMode = cfg.get<string>('thinkingTransformMode', 'none');
 
+                    const ssePreflightEnabled = cfg.get<boolean>('ssePreflightEnabled', true);
                     const wantStreamingPreflight =
+                        ssePreflightEnabled &&
                         status === 200 &&
                         streamOpts?.isStreaming === true &&
                         (req.url ?? '').startsWith('/v1/chat/completions');
@@ -560,6 +570,10 @@ export class ThrottlingProxyServer implements vscode.Disposable {
                                     res.end();
                                 }
                             });
+                        } else if (streamOpts?.modelName) {
+                            // Fix model name in response to match requested model
+                            const fixer = new ModelNameFixerTransform(streamOpts.modelName);
+                            source.pipe(fixer).pipe(res);
                         } else {
                             source.pipe(res);
                         }
@@ -993,6 +1007,26 @@ class SSEChoicesDetector extends Transform {
         if (!this.sawChoices) {
             this.warn('WARNING: Streaming response ended without any choices detected (Copilot may report "Response contained no choices")');
         }
+        callback();
+    }
+}
+
+/**
+ * Simple Transform that fixes model name mismatches in SSE streaming responses.
+ * The upstream CLIProxyAPI may return a different model name (e.g., "claude-opus-4-5-thinking")
+ * than what was requested (e.g., "gemini-claude-opus-4-5-thinking"). VS Code Copilot Chat
+ * displays the model name from the response, causing UI confusion.
+ */
+class ModelNameFixerTransform extends Transform {
+    constructor(private readonly requestedModelName: string) {
+        super();
+    }
+
+    _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
+        // Fast string replacement using regex - no JSON parsing overhead
+        const text = chunk.toString('utf8');
+        const fixed = text.replace(/"model"\s*:\s*"[^"]+"/g, `"model":"${this.requestedModelName}"`);
+        this.push(Buffer.from(fixed, 'utf8'));
         callback();
     }
 }
