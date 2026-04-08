@@ -430,7 +430,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <li>VS Code Insiders (for custom models)</li>
             <li>GitHub Copilot Pro subscription</li>
             <li>GitHub Copilot + Chat (pre-release)</li>
-            <li>CLIProxyAPI installed in %USERPROFILE%\\CLIProxyAPI</li>
+            <li>CLIProxyAPI installed in your home folder under <code>CLIProxyAPI/</code></li>
         </ul>
     </div>
 

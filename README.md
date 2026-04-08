@@ -8,6 +8,7 @@
 
 - **One-Click Server Management**: Start/stop CLIProxyAPI directly from VS Code
 - **Automatic Configuration**: Creates default `config.yaml` if missing
+- **Cross-Platform Setup**: Auto-installs CLIProxyAPI on Windows, macOS, and Linux
 - **BYOK Model Registration**: Registers Antigravity models using VS Code's official Language Model API
 - **Status Bar Integration**: Quick visual status and server controls
 - **Sidebar Dashboard**: Monitor server status, view available models, and manage settings
@@ -48,17 +49,28 @@
    code-insiders --install-extension github.copilot-chat --pre-release
    ```
 
-4. **CLIProxyAPI** installed in `%USERPROFILE%\CLIProxyAPI\`
+4. **CLIProxyAPI** installed in your home folder under `CLIProxyAPI/`
 
    The extension can automatically download and install the latest version for you when you attempt to start the server. Alternatively, you can install it manually:
 
    ```powershell
+   # Windows
    $zipPath = "$env:TEMP\CLIProxyAPI.zip"
    $extractPath = "$env:USERPROFILE\CLIProxyAPI"
-   # Download latest from GitHub
    Invoke-WebRequest -Uri "https://github.com/router-for-me/CLIProxyAPI/releases/latest/download/CLIProxyAPI_windows_amd64.zip" -OutFile $zipPath
    Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
    Remove-Item $zipPath
+   ```
+
+   ```bash
+   # Linux
+   archive_path="$(mktemp --suffix=.tar.gz)"
+   extract_path="$HOME/CLIProxyAPI"
+   curl -L "https://github.com/router-for-me/CLIProxyAPI/releases/latest/download/CLIProxyAPI_linux_amd64.tar.gz" -o "$archive_path"
+   mkdir -p "$extract_path"
+   tar -xzf "$archive_path" -C "$extract_path"
+   chmod +x "$extract_path/cli-proxy-api"
+   rm -f "$archive_path"
    ```
 
 ### Model Enablement
@@ -78,7 +90,7 @@ After configuring models, you must manually enable them in VS Code:
 
 
 5. **CLIProxyAPI Configuration**: (Optional) The extension will automatically create a default `config.yaml` if one doesn't exist.
-   - Default location: `%USERPROFILE%\CLIProxyAPI\config.yaml`
+   - Default location: `~/CLIProxyAPI/config.yaml`
    - Default content:
      ```yaml
      port: 8317

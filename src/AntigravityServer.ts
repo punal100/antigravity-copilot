@@ -20,6 +20,10 @@ export interface ServerStatus {
     pid?: number;
 }
 
+function getCLIProxyExecutableName(): string {
+    return process.platform === 'win32' ? 'cli-proxy-api.exe' : 'cli-proxy-api';
+}
+
 export class AntigravityServer implements vscode.Disposable {
     private process: ChildProcess | undefined;
     private config: ServerConfig;
@@ -66,7 +70,7 @@ export class AntigravityServer implements vscode.Disposable {
 
     private getDefaultExecutablePath(): string {
         const userProfile = os.homedir();
-        const defaultPath = path.join(userProfile, 'CLIProxyAPI', 'cli-proxy-api.exe');
+        const defaultPath = path.join(userProfile, 'CLIProxyAPI', getCLIProxyExecutableName());
         return defaultPath;
     }
 
@@ -162,11 +166,8 @@ providers:
 
         // Check if executable exists
         if (!fs.existsSync(this.config.executablePath)) {
-            const isWindows = process.platform === 'win32';
             const options = ['Download CLIProxyAPI', 'Configure Path'];
-            if (isWindows) {
-                options.splice(1, 0, 'Auto-Download & Install');
-            }
+            options.splice(1, 0, 'Auto-Download & Install');
 
             const selection = await vscode.window.showErrorMessage(
                 `CLIProxyAPI executable not found at: ${this.config.executablePath}`,
@@ -465,11 +466,8 @@ providers:
     public async login(): Promise<void> {
         // Check if executable exists
         if (!fs.existsSync(this.config.executablePath)) {
-            const isWindows = process.platform === 'win32';
             const options = ['Download CLIProxyAPI', 'Configure Path'];
-            if (isWindows) {
-                options.splice(1, 0, 'Auto-Download & Install');
-            }
+            options.splice(1, 0, 'Auto-Download & Install');
 
             const selection = await vscode.window.showErrorMessage(
                 `CLIProxyAPI executable not found at: ${this.config.executablePath}`,
@@ -599,8 +597,11 @@ providers:
         });
 
         terminal.show();
-        // Use & call operator for PowerShell to execute quoted paths
-        terminal.sendText(`& "${this.config.executablePath}" --antigravity-login`);
+        if (process.platform === 'win32') {
+            terminal.sendText(`& "${this.config.executablePath}" --antigravity-login`);
+        } else {
+            terminal.sendText(`"${this.config.executablePath}" --antigravity-login`);
+        }
 
         vscode.window.showInformationMessage(
             'Follow the instructions in the terminal to login to Antigravity',

@@ -3,7 +3,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
+import { execFile as execFileCallback } from 'child_process';
+import { promisify } from 'util';
 import * as yauzl from 'yauzl';
+
+const execFileAsync = promisify(execFileCallback);
 
 interface GitHubAsset {
     name: string;
@@ -14,6 +18,23 @@ interface GitHubAsset {
 interface GitHubRelease {
     tag_name: string;
     assets: GitHubAsset[];
+}
+
+function getPlatformAssetName(): 'windows' | 'linux' | 'darwin' | 'freebsd' {
+    if (process.platform === 'win32') {
+        return 'windows';
+    }
+    if (process.platform === 'darwin') {
+        return 'darwin';
+    }
+    if (process.platform === 'freebsd') {
+        return 'freebsd';
+    }
+    return 'linux';
+}
+
+function getExecutableName(): string {
+    return process.platform === 'win32' ? 'cli-proxy-api.exe' : 'cli-proxy-api';
 }
 
 /**
@@ -65,15 +86,16 @@ async function fetchLatestRelease(): Promise<GitHubRelease> {
 }
 
 /**
- * Finds the correct Windows asset in the release
+ * Finds the correct platform asset in the release
  */
-function findWindowsAsset(assets: GitHubAsset[]): GitHubAsset | undefined {
+function findPlatformAsset(assets: GitHubAsset[]): GitHubAsset | undefined {
     const arch = process.arch;
     const archPattern = arch === 'arm64' ? 'arm64' : arch === 'ia32' ? '386' : 'amd64';
+    const platformPattern = getPlatformAssetName();
     return assets.find(asset =>
-        asset.name.toLowerCase().includes('windows') &&
+        asset.name.toLowerCase().includes(platformPattern) &&
         asset.name.toLowerCase().includes(archPattern) &&
-        asset.name.endsWith('.zip')
+        (process.platform === 'win32' ? asset.name.endsWith('.zip') : asset.name.endsWith('.tar.gz'))
     );
 }
 
@@ -234,12 +256,25 @@ async function extractZip(zipPath: string, targetDir: string): Promise<void> {
 }
 
 /**
- * Finds cli-proxy-api.exe recursively in a directory
+ * Extracts a tar.gz file to a target directory
+ */
+async function extractTarGz(tarPath: string, targetDir: string): Promise<void> {
+    await execFileAsync('tar', ['-xzf', tarPath, '-C', targetDir]);
+}
+
+/**
+ * Finds cli-proxy-api recursively in a directory
  */
 function findExecutable(targetDir: string): string | null {
-    const targetPath = path.join(targetDir, 'cli-proxy-api.exe');
-    if (fs.existsSync(targetPath)) {
-        return targetPath;
+    const targetNames = process.platform === 'win32'
+        ? ['cli-proxy-api.exe']
+        : ['cli-proxy-api', 'cli-proxy-api.exe'];
+
+    for (const targetName of targetNames) {
+        const targetPath = path.join(targetDir, targetName);
+        if (fs.existsSync(targetPath)) {
+            return targetPath;
+        }
     }
 
     const subdirs = fs.readdirSync(targetDir, { withFileTypes: true })
@@ -264,37 +299,46 @@ export async function installCLIProxyAPI(
     outputChannel?: vscode.OutputChannel
 ): Promise<{ success: boolean; version: string; executablePath?: string; error?: string }> {
     const tempDir = os.tmpdir();
-    const zipPath = path.join(tempDir, 'CLIProxyAPI.zip');
-    const userProfile = process.env.USERPROFILE || os.homedir();
+    const isWindows = process.platform === 'win32';
+    const archiveExtension = isWindows ? 'zip' : 'tar.gz';
+    const archivePath = path.join(tempDir, `CLIProxyAPI.${archiveExtension}`);
+    const userProfile = os.homedir();
     const targetDir = path.join(userProfile, 'CLIProxyAPI');
 
     try {
         outputChannel?.appendLine('[INFO] Fetching latest CLIProxyAPI release information...');
         const release = await fetchLatestRelease();
-        const asset = findWindowsAsset(release.assets);
+        const asset = findPlatformAsset(release.assets);
 
         if (!asset) {
-            return { success: false, version: '', error: 'Could not find Windows amd64 ZIP in the latest release' };
+            return { success: false, version: '', error: `Could not find a ${process.platform} asset in the latest release` };
         }
 
         outputChannel?.appendLine(`[INFO] Downloading CLIProxyAPI ${release.tag_name} from: ${asset.browser_download_url}`);
-        await downloadFile(asset.browser_download_url, zipPath, onProgress);
+        await downloadFile(asset.browser_download_url, archivePath, onProgress);
 
         outputChannel?.appendLine(`[INFO] Extracting to: ${targetDir}`);
         if (!fs.existsSync(targetDir)) {
             fs.mkdirSync(targetDir, { recursive: true });
         }
-        await extractZip(zipPath, targetDir);
+        if (isWindows) {
+            await extractZip(archivePath, targetDir);
+        } else {
+            await extractTarGz(archivePath, targetDir);
+        }
 
         const foundExecutable = findExecutable(targetDir);
         if (foundExecutable) {
             outputChannel?.appendLine(`[INFO] Found executable at: ${foundExecutable}`);
+            if (process.platform !== 'win32') {
+                fs.chmodSync(foundExecutable, 0o755);
+            }
         } else {
-            outputChannel?.appendLine(`[WARN] Could not find cli-proxy-api.exe in ${targetDir}`);
+            outputChannel?.appendLine(`[WARN] Could not find ${getExecutableName()} in ${targetDir}`);
         }
 
-        if (fs.existsSync(zipPath)) {
-            fs.unlinkSync(zipPath);
+        if (fs.existsSync(archivePath)) {
+            fs.unlinkSync(archivePath);
         }
 
         outputChannel?.appendLine('[INFO] CLIProxyAPI installed successfully');
@@ -303,9 +347,9 @@ export async function installCLIProxyAPI(
         const msg = error instanceof Error ? error.message : String(error);
         outputChannel?.appendLine(`[ERROR] Installation failed: ${msg}`);
 
-        if (fs.existsSync(zipPath)) {
+        if (fs.existsSync(archivePath)) {
             try {
-                fs.unlinkSync(zipPath);
+                fs.unlinkSync(archivePath);
             } catch (cleanupError) {
                 outputChannel?.appendLine(`[WARN] Failed to cleanup temp file: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
             }
