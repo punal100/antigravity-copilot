@@ -117,13 +117,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         
         // Get rate limiter status
         const rlStatus = this._getRateLimiter?.()?.getStatus();
-        const rlStatusText = rlStatus?.isBusy ? '🔄 Busy' : (rlStatus?.isInCooldown ? `⏳ Cooldown (${Math.ceil((rlStatus?.remainingCooldownMs || 0) / 1000)}s)` : '✅ Ready');
+        const rlStatusText = rlStatus?.isBusy ? 'Busy' : (rlStatus?.isInCooldown ? `Cooldown (${Math.ceil((rlStatus?.remainingCooldownMs || 0) / 1000)}s)` : 'Ready');
         const rlStatusColor = rlStatus?.isBusy ? '#f59e0b' : (rlStatus?.isInCooldown ? '#3b82f6' : '#22c55e');
 
         const resources = {
-            repository: 'https://github.com/punal100/antigravity-copilot',
-            issues: 'https://github.com/punal100/antigravity-copilot/issues',
-            license: 'https://github.com/punal100/antigravity-copilot/blob/main/LICENSE',
+            repository: 'https://github.com/ginerJuanUdesa/antigravity-copilot',
+            issues: 'https://github.com/ginerJuanUdesa/antigravity-copilot/issues',
+            license: 'https://github.com/ginerJuanUdesa/antigravity-copilot/blob/main/LICENSE',
             microsoftDocs:
                 'https://code.visualstudio.com/docs/copilot/customization/language-models#_bring-your-own-language-model-key'
         };
@@ -323,32 +323,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     ${!isRunning ? `
         <div class="alert alert-warning">
-            ⚠️ Antigravity server is not running. Start it to use Claude and Gemini models in Copilot Chat.
+            Antigravity server is not running. Start it to use Claude and Gemini models in Copilot Chat.
         </div>
     ` : `
         <div class="alert alert-success">
-            ✅ Server is running! You can now use Antigravity models in Copilot Chat.
+            Server is running! You can now use Antigravity models in Copilot Chat.
         </div>
     `}
 
     <div class="actions">
         ${isRunning ? `
-            <button class="btn btn-danger" onclick="stopServer()">⏹️ Stop Server</button>
-            <button class="btn btn-secondary" onclick="restartServer()">🔄 Restart Server</button>
+            <button class="btn btn-danger" onclick="stopServer()">Stop Server</button>
+            <button class="btn btn-secondary" onclick="restartServer()">Restart Server</button>
         ` : `
-            <button class="btn btn-primary" onclick="startServer()">▶️ Start Server</button>
+            <button class="btn btn-primary" onclick="startServer()">Start Server</button>
         `}
-        <button class="btn btn-secondary" onclick="loginAntigravity()">🔐 Login to Antigravity</button>
-        <button class="btn btn-secondary" onclick="configureModels()">⚙️ Configure Models</button>
-        <button class="btn btn-secondary" onclick="openSettings()">⚙️ Settings</button>
-        <button class="btn btn-secondary" onclick="showLogs()">📋 Show Logs</button>
+        <button class="btn btn-secondary" onclick="loginAntigravity()">Login to Antigravity</button>
+        <button class="btn btn-secondary" onclick="configureModels()">Configure Models</button>
+        <button class="btn btn-secondary" onclick="openSettings()">Settings</button>
+        <button class="btn btn-secondary" onclick="showLogs()">Show Logs</button>
     </div>
 
     <div class="card">
-        <h3>ℹ️ Server Info</h3>
+        <h3>Server Info</h3>
         <div class="info-row">
             <span class="info-label">Status</span>
-            <span class="info-value">${isRunning ? '🟢 Running' : '🔴 Stopped'}</span>
+            <span class="info-value">${isRunning ? 'Running' : 'Stopped'}</span>
         </div>
         <div class="info-row">
             <span class="info-label">CLI Server Port</span>
@@ -356,7 +356,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         </div>
         <div class="info-row">
             <span class="info-label">Proxy Status</span>
-            <span class="info-value">${proxyRunning ? '🟢 Running' : '⚫ Disabled'}</span>
+            <span class="info-value">${proxyRunning ? 'Running' : 'Disabled'}</span>
         </div>
         ${proxyRunning && proxyPort ? `
         <div class="info-row">
@@ -382,7 +382,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     ${rlStatus ? `
     <div class="card">
-        <h3>⚡ Rate Limiter</h3>
+        <h3>Rate Limiter</h3>
         <div class="info-row">
             <span class="info-label">Status</span>
             <span class="info-value" style="color: ${rlStatusColor}">${rlStatusText}</span>
@@ -393,15 +393,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         </div>
         <div style="margin-top: 12px; display: flex; gap: 8px;">
             ${rlStatus.isBusy || rlStatus.isInCooldown ? `
-                <button class="btn btn-secondary" style="flex: 1;" onclick="resetRateLimiter()">🔄 Reset</button>
+                <button class="btn btn-secondary" style="flex: 1;" onclick="resetRateLimiter()">Reset</button>
             ` : ''}
-            <button class="btn btn-secondary" style="flex: 1;" onclick="openRateLimitSettings()">⚙️ Settings</button>
+            <button class="btn btn-secondary" style="flex: 1;" onclick="openRateLimitSettings()">Settings</button>
         </div>
     </div>
     ` : ''}
 
     <div class="card">
-        <h3>🤖 Available Models (10)</h3>
+        <h3>Available Models (10)</h3>
         <div class="model-list">
             ${MODEL_LIST.map(model => `
                 <div class="model-item">
@@ -415,7 +415,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="card">
-        <h3>🚀 Quick Setup</h3>
+        <h3>Quick Setup</h3>
         <ol style="font-size: 12px; line-height: 1.6; padding-left: 20px; margin-top: 8px;">
             <li>Click "Login to Antigravity" to authenticate</li>
             <li>Click "Start Server" to run CLIProxyAPI</li>
@@ -425,7 +425,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="card">
-        <h3>📖 Requirements</h3>
+        <h3>Requirements</h3>
         <ul style="font-size: 11px; line-height: 1.5; padding-left: 20px; margin-top: 8px; color: var(--vscode-descriptionForeground);">
             <li>VS Code Insiders (for custom models)</li>
             <li>GitHub Copilot Pro subscription</li>
@@ -435,22 +435,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="card">
-        <h3>🔗 Resources</h3>
+        <h3>Resources</h3>
         <div class="resource-list">
             <a class="resource-link" href="#" onclick="openExternal('${resources.repository}'); return false;">
-                <span class="resource-icon">📦</span>
                 <span>Repository</span>
             </a>
             <a class="resource-link" href="#" onclick="openExternal('${resources.issues}'); return false;">
-                <span class="resource-icon">🐛</span>
                 <span>Issues</span>
             </a>
             <a class="resource-link" href="#" onclick="openExternal('${resources.license}'); return false;">
-                <span class="resource-icon">📄</span>
                 <span>License</span>
             </a>
             <a class="resource-link" href="#" onclick="openExternal('${resources.microsoftDocs}'); return false;">
-                <span class="resource-icon">🧭</span>
                 <span>Microsoft (BYOK docs)</span>
             </a>
         </div>

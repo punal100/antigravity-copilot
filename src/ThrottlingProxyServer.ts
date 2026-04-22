@@ -340,6 +340,10 @@ export class ThrottlingProxyServer implements vscode.Disposable {
 
             const payload: any = JSON.parse(body.toString('utf8'));
 
+            // 0) Strip JSON Schema fields the Antigravity/Google API does not support
+            //    (e.g. enumDescriptions injected by Copilot → INVALID_ARGUMENT upstream)
+            sanitizeToolSchemas(payload);
+
             // 1) Tool output truncation (reduces prompt size without impacting user instructions much)
             const truncateTools = cfg.get<boolean>('truncateToolOutput', true);
             let toolTruncation: ToolTruncationMeta | undefined;
@@ -839,6 +843,50 @@ function truncateToolMessagesInPayload(
     }
 
     return meta;
+}
+
+// Fields in JSON Schema that the Google/Antigravity API does not recognise.
+// Copilot injects these (e.g. enumDescriptions) which causes INVALID_ARGUMENT errors.
+const UNSUPPORTED_SCHEMA_FIELDS = new Set([
+    'enumDescriptions',
+    'markdownDescription',
+    'errorMessage',
+    'unevaluatedProperties',
+]);
+
+function stripUnsupportedSchemaFields(node: any): void {
+    if (!node || typeof node !== 'object') {
+        return;
+    }
+    if (Array.isArray(node)) {
+        for (const item of node) {
+            stripUnsupportedSchemaFields(item);
+        }
+        return;
+    }
+    for (const key of Object.keys(node)) {
+        if (UNSUPPORTED_SCHEMA_FIELDS.has(key)) {
+            delete node[key];
+        } else {
+            stripUnsupportedSchemaFields(node[key]);
+        }
+    }
+}
+
+function sanitizeToolSchemas(payload: any): void {
+    if (!Array.isArray(payload?.tools)) {
+        return;
+    }
+    for (const tool of payload.tools) {
+        // OpenAI format: tools[].function.parameters
+        if (tool?.function?.parameters) {
+            stripUnsupportedSchemaFields(tool.function.parameters);
+        }
+        // Some APIs embed parameters directly on the tool object
+        if (tool?.parameters) {
+            stripUnsupportedSchemaFields(tool.parameters);
+        }
+    }
 }
 
 function sanitizeForLog(text: string): string {

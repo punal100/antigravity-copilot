@@ -47,7 +47,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 | Info | Value |
 |------|-------|
-| Status | 🟢 Running |
+| Status | Running |
 | Port | ${status.config.port} |
 | Models | 10 |
 
@@ -874,7 +874,7 @@ async function showModelEnablementGuide(): Promise<void> {
         .join('\n');
     
     const selection = await vscode.window.showInformationMessage(
-        `🎯 Recommended Models to Enable:\n\n${enabledList}\n\n` +
+        `Recommended Models to Enable:\n\n${enabledList}\n\n` +
         `Open Copilot Chat → Manage Models, search for each model, and click the eye icon to enable it.`,
         { modal: true },
         'Open Manage Models',
